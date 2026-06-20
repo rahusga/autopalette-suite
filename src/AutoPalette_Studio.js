@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.0 (May 2026)
+ * AutoPalette Studio version 1.0.3 (May 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -14,6 +14,9 @@
  *       Studio UI, base palette previews, Cosmetic Presets, Boosted Apply/Undo/Redo,
  *       Advanced Apply/Undo/Redo, mask protection, linear-input preview/final parity,
  *       selectable preview quality, output-id control and temporary-view cleanup.
+ * 1.0.1 - Hotfix: Classic SHO moved to advanced combinations; Masks closed by default.
+ * 1.0.2 - Hotfix: Cosmetic Presets locked until previews are available.
+ * 1.0.3 - Hotfix: Boosted, Advanced and Mask controls locked until a preview is loaded.
  *
  *****************************************************************************/
 
@@ -35,7 +38,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #feature-id AutoPaletteStudio : Astrocitas > AutoPalette Studio
-#feature-info AutoPalette Studio v1.0<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-info AutoPalette Studio v1.0.3<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -50,7 +53,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.0"
+#define VERSION "1.0.3"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -393,7 +396,6 @@ var PALETTE_DEFINITIONS = [
 var DEFAULT_CLASSIC_PALETTE_INDICES = [
    PALETTE_ORIGINAL,
    PALETTE_CLASSIC_HOO,
-   PALETTE_CLASSIC_SHO,
    PALETTE_CLASSIC_FORAXX,
    PALETTE_FORAXX_HOS
 ];
@@ -7251,6 +7253,8 @@ function autopaletteMain() {
    function markPreviewSetupChanged()
    {
       dlg.previewsReady = false;
+      if ( dlg.setBoostedControlsCalculationBusy )
+         dlg.setBoostedControlsCalculationBusy( false );
       // v0.13.65: setup changes invalidate the whole visual workflow.
       // New image/configuration values are not meaningful until Create Previews
       // is pressed again, so reset Boosted/Advanced/Preset state to neutral.
@@ -8155,6 +8159,15 @@ data.selectedPreviewBoosted = false;
    this.previewCyanGold_Row = createBoostedControlRow( this, this.previewCyanGoldBalance_Control, this.previewCyanGold_ResetButton );
    this.previewRedYellow_Row = createBoostedControlRow( this, this.previewRedYellowBalance_Control, this.previewRedYellow_ResetButton );
 
+   // A Studio adjustment is valid only when an actual large preview has been
+   // rendered. This prevents UI events from controls before Create Previews.
+   this.hasLoadedLargePreviewForControls = function()
+   {
+      return !!( this.previewsReady && !this.previewGenerationBusy &&
+                 isValidView( this.largePreviewSourceView ) &&
+                 this.largePreviewBitmap != null );
+   };
+
    // RC5.2.4: prevent overlapping slider actions while a large preview
    // PixelMath/render pass is active. PixInsight is mostly single-threaded,
    // but queued UI events can still arrive while a previous calculation is
@@ -8162,7 +8175,8 @@ data.selectedPreviewBoosted = false;
    this.setBoostedControlsCalculationBusy = function( busy )
    {
       this.boostedControlsCalculationBusy = !!busy;
-      var enabled = !!(!busy && !this.finalGenerationBusy && !this.previewGenerationBusy && this.previewsReady);
+      var enabled = !!(!busy && !this.finalGenerationBusy && !this.previewGenerationBusy &&
+                         this.hasLoadedLargePreviewForControls && this.hasLoadedLargePreviewForControls());
       var controls = [
          this.previewSCNR_Control,
          this.previewOIIIBoost_Control,
@@ -8208,6 +8222,8 @@ data.selectedPreviewBoosted = false;
          this.redoBoosted_Button.enabled = canRedoBoosted;
       }
       if ( this.lastPreview_CheckBox ) this.lastPreview_CheckBox.enabled = enabled;
+      if ( this.refreshAdvancedControlsState ) this.refreshAdvancedControlsState();
+      if ( this.refreshMaskControlsState ) this.refreshMaskControlsState();
       this.update();
    };
 
@@ -8306,6 +8322,8 @@ data.selectedPreviewBoosted = false;
 
    this.computeAdvancedPreviewNow = function()
    {
+      if ( !this.hasLoadedLargePreviewForControls || !this.hasLoadedLargePreviewForControls() )
+         return;
       if ( this.advancedPreviewBusy )
          return;
 
@@ -8444,6 +8462,8 @@ data.selectedPreviewBoosted = false;
 
    this.applyAdvancedPreviewNow = function( showOverlay )
    {
+      if ( !this.hasLoadedLargePreviewForControls || !this.hasLoadedLargePreviewForControls() )
+         return;
       showOverlay = !!showOverlay;
       this.syncAdvancedControlValues();
       if ( !isAnyAdvancedPreviewActive() )
@@ -8491,6 +8511,8 @@ data.selectedPreviewBoosted = false;
    this.scheduleAdvancedPreviewRefresh = function( forceRefresh )
    {
       if ( this.realtimeRefreshSuspended )
+         return;
+      if ( !this.hasLoadedLargePreviewForControls || !this.hasLoadedLargePreviewForControls() )
          return;
 
       this.syncAdvancedControlValues();
@@ -8544,6 +8566,8 @@ data.selectedPreviewBoosted = false;
    this.applySIIAccent_Button.toolTip = "<p><b>Apply</b></p>Applies the enabled Advanced controls as a new layer over the current preview. Repeated clicks can stack OIII, SII, Ha or Gold Accent effects. Boosted controls remain realtime fine-tuning over the stacked result.</p>";
    this.applySIIAccent_Button.onClick = function()
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+         return;
       if ( !isAnyAdvancedPreviewActive() )
       {
          (new MessageBox( "Enable at least one Advanced control and set its amount above zero.", TITLE, StdIcon_Information, StdButton_Ok )).execute();
@@ -8559,6 +8583,8 @@ data.selectedPreviewBoosted = false;
    this.undoAdvanced_Button.toolTip = "<p><b>Undo</b></p>Undo the last applied Advanced layer in the Studio preview stack.</p>";
    this.undoAdvanced_Button.onClick = function()
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+         return;
       dlg.undoAdvancedLayer();
    };
 
@@ -8568,6 +8594,8 @@ data.selectedPreviewBoosted = false;
    this.redoAdvanced_Button.toolTip = "<p><b>Redo</b></p>Redo the last undone Advanced layer in the Studio preview stack.</p>";
    this.redoAdvanced_Button.onClick = function()
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+         return;
       dlg.redoAdvancedLayer();
    };
 
@@ -8619,16 +8647,22 @@ data.selectedPreviewBoosted = false;
    {
       this.syncAdvancedControlValues();
 
-      var goldEnabled = data.previewEnableSIIAccent;
-      var lightEnabled = data.previewEnableChannelLightness;
+      var controlsEnabled = !!(!this.finalGenerationBusy && !this.previewGenerationBusy &&
+                               this.hasLoadedLargePreviewForControls && this.hasLoadedLargePreviewForControls());
+      var goldEnabled = controlsEnabled && data.previewEnableSIIAccent;
+      var lightEnabled = controlsEnabled && data.previewEnableChannelLightness;
       var implementedLightSource = (data.previewChannelLightnessSource == 0 || data.previewChannelLightnessSource == 1 || data.previewChannelLightnessSource == 2);
 
+      if ( this.enableSIIAccent_CheckBox ) this.enableSIIAccent_CheckBox.enabled = controlsEnabled;
+      if ( this.enableChannelLightness_CheckBox ) this.enableChannelLightness_CheckBox.enabled = controlsEnabled;
       this.previewSIIHighlightAccent_Control.enabled = goldEnabled;
       this.channelLightnessSource_Combo.enabled = lightEnabled;
       this.previewChannelLightnessAmount_Control.enabled = lightEnabled && implementedLightSource;
-      this.applySIIAccent_Button.enabled = !this.realtimePreviewCalculating && isAnyAdvancedPreviewActive();
+      this.applySIIAccent_Button.enabled = controlsEnabled && !this.realtimePreviewCalculating && isAnyAdvancedPreviewActive();
       if ( this.undoAdvanced_Button )
-         this.undoAdvanced_Button.enabled = this.advancedUndoStack.length > 0;
+         this.undoAdvanced_Button.enabled = controlsEnabled && this.advancedUndoStack.length > 0;
+      if ( this.redoAdvanced_Button )
+         this.redoAdvanced_Button.enabled = controlsEnabled && this.advancedRedoStack.length > 0;
    };
 
    this.enableSIIAccent_CheckBox.onCheck = function( checked )
@@ -8673,9 +8707,17 @@ data.selectedPreviewBoosted = false;
    this.enableStarProtection_CheckBox = new CheckBox( this );
    this.enableStarProtection_CheckBox.text = "Enable Mask Protection";
    this.enableStarProtection_CheckBox.checked = data.previewEnableMaskProtection || data.previewEnableStarProtection;
+   this.enableStarProtection_CheckBox.enabled = false;
    this.enableStarProtection_CheckBox.toolTip = "<p><b>Mask Protection</b></p>Enables the selected mask preset. The mask modulates Boosted and Advanced effects; Presets only configure controls. Star Protection protects stars/halos; Blue Core selects OIII/cyan-blue structures; Warm/Gold selects Ha/SII warm structures; Faint Red selects weaker red Ha/SII structures.</p>";
    this.enableStarProtection_CheckBox.onCheck = function( checked )
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+      {
+         data.previewEnableMaskProtection = false;
+         data.previewEnableStarProtection = false;
+         this.checked = false;
+         return;
+      }
       data.previewEnableMaskProtection = checked;
       data.previewEnableStarProtection = checked; // legacy alias
       if ( !checked )
@@ -8700,6 +8742,8 @@ data.selectedPreviewBoosted = false;
       if ( dlg.exportMask_Button )
          dlg.exportMask_Button.enabled = checked;
       invalidateStarMaskCache();
+      if ( dlg.refreshMaskControlsState )
+         dlg.refreshMaskControlsState();
       if ( !checked )
          dlg.refreshLargePreviewBoost( true );
       else
@@ -8713,10 +8757,12 @@ data.selectedPreviewBoosted = false;
    this.starProtectionAmount_Control.setPrecision( 3 );
    this.starProtectionAmount_Control.slider.setRange( 0, 10000 );
    this.starProtectionAmount_Control.setValue( data.previewStarProtectionAmount );
-   this.starProtectionAmount_Control.enabled = data.previewEnableMaskProtection || data.previewEnableStarProtection;
+   this.starProtectionAmount_Control.enabled = false;
    this.starProtectionAmount_Control.toolTip = "<p><b>Mask amount</b></p>Controls protection strength and halo coverage. Higher values expand and soften the MLT/starlet star mask to protect halos, not just cores.</p>";
    this.starProtectionAmount_Control.onValueUpdated = function( value )
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+         return;
       data.previewStarProtectionAmount = value;
       invalidateStarMaskCache();
       dlg.clearLargePreviewCache();
@@ -8728,10 +8774,16 @@ data.selectedPreviewBoosted = false;
    this.showMaskPreview_CheckBox = new CheckBox( this );
    this.showMaskPreview_CheckBox.text = "View in preview";
    this.showMaskPreview_CheckBox.checked = data.previewShowMaskPreview;
-   this.showMaskPreview_CheckBox.enabled = data.previewEnableMaskProtection || data.previewEnableStarProtection;
+   this.showMaskPreview_CheckBox.enabled = false;
    this.showMaskPreview_CheckBox.toolTip = "<p>Shows the current mask in the large preview. Disable it to return to the current image preview without changing any processing state.</p>";
    this.showMaskPreview_CheckBox.onCheck = function( checked )
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+      {
+         data.previewShowMaskPreview = false;
+         this.checked = false;
+         return;
+      }
       if ( checked && !(data.previewEnableMaskProtection || data.previewEnableStarProtection) )
       {
          data.previewShowMaskPreview = false;
@@ -8746,10 +8798,16 @@ data.selectedPreviewBoosted = false;
    this.invertMask_CheckBox = new CheckBox( this );
    this.invertMask_CheckBox.text = "Invert";
    this.invertMask_CheckBox.checked = !!data.previewInvertMask;
-   this.invertMask_CheckBox.enabled = data.previewEnableMaskProtection || data.previewEnableStarProtection;
+   this.invertMask_CheckBox.enabled = false;
    this.invertMask_CheckBox.toolTip = "<p>Inverts the selected mask. The inverted version is cached separately, so Boosted and Advanced controls can reuse it without recalculating the mask on every movement.</p>";
    this.invertMask_CheckBox.onCheck = function( checked )
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+      {
+         data.previewInvertMask = false;
+         this.checked = false;
+         return;
+      }
       if ( checked && !(data.previewEnableMaskProtection || data.previewEnableStarProtection) )
       {
          data.previewInvertMask = false;
@@ -8769,10 +8827,12 @@ data.selectedPreviewBoosted = false;
    this.exportMask_Button = new PushButton( this );
    this.exportMask_Button.text = "Export Mask";
    this.exportMask_Button.toolTip = "<p>Exports the currently selected mask preset to a visible PixInsight grayscale view. If <b>Invert mask</b> is enabled, the exported mask is inverted too.</p>";
-   this.exportMask_Button.enabled = data.previewEnableMaskProtection || data.previewEnableStarProtection;
+   this.exportMask_Button.enabled = false;
    this.exportMask_Button.setFixedWidth( this.font.width( "Export Mask" ) + 44 );
    this.exportMask_Button.onClick = function()
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+         return;
       dlg.exportCurrentMaskToView();
    };
 
@@ -8796,9 +8856,12 @@ data.selectedPreviewBoosted = false;
    this.maskPreset_Combo.addItem( "Warm/Gold" );
    this.maskPreset_Combo.addItem( "Faint Red" );
    this.maskPreset_Combo.currentItem = data.previewMaskPreset || 0;
+   this.maskPreset_Combo.enabled = false;
    this.maskPreset_Combo.toolTip = "<p><b>Preconfigured masks</b></p><p><b>Star Protection</b>: protects stars and halos from Boosted/Advanced changes.</p><p><b>Blue Core</b>: applies Boosted/Advanced changes mainly to OIII/cyan-blue regions.</p><p><b>Warm/Gold</b>: applies Boosted/Advanced changes mainly to warm Ha/SII/gold structures.</p><p><b>Faint Red</b>: applies Boosted/Advanced changes mainly to weaker red Ha/SII regions, avoiding the brightest warm structures.</p></p>";
    this.maskPreset_Combo.onItemSelected = function()
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+         return;
       data.previewMaskPreset = this.currentItem;
       invalidateStarMaskCache();
       dlg.clearLargePreviewCache();
@@ -8828,6 +8891,19 @@ data.selectedPreviewBoosted = false;
       addSpacing( 4 );
       add( this.maskActions_Sizer );
    }
+
+   this.refreshMaskControlsState = function()
+   {
+      var controlsEnabled = !!(!this.finalGenerationBusy && !this.previewGenerationBusy &&
+                               this.hasLoadedLargePreviewForControls && this.hasLoadedLargePreviewForControls());
+      var maskActive = controlsEnabled && (data.previewEnableMaskProtection || data.previewEnableStarProtection);
+      if ( this.maskPreset_Combo ) this.maskPreset_Combo.enabled = controlsEnabled;
+      if ( this.enableStarProtection_CheckBox ) this.enableStarProtection_CheckBox.enabled = controlsEnabled;
+      if ( this.starProtectionAmount_Control ) this.starProtectionAmount_Control.enabled = maskActive;
+      if ( this.showMaskPreview_CheckBox ) this.showMaskPreview_CheckBox.enabled = maskActive;
+      if ( this.invertMask_CheckBox ) this.invertMask_CheckBox.enabled = maskActive;
+      if ( this.exportMask_Button ) this.exportMask_Button.enabled = maskActive;
+   };
 
    this.cosmeticPreset_Label = new Label( this );
    this.cosmeticPreset_Label.text = "Preset:";
@@ -8992,6 +9068,9 @@ data.selectedPreviewBoosted = false;
 
    this.applyBoostedPresetDefinition = function( presetIndex )
    {
+      if ( !this.previewsReady || this.previewGenerationBusy || this.realtimeRefreshBusy )
+         return;
+
       var p = getBoostedWorkflowPresetDefinition( presetIndex );
       this.applyBoostedControlsState( p.boosted );
 
@@ -9277,9 +9356,12 @@ data.selectedPreviewBoosted = false;
    this.boostPreset_Combo.addItem( "Deep Contrast" );
    this.boostPreset_Combo.addItem( "Foraxx Pop" );
    this.boostPreset_Combo.currentItem = 0;
-   this.boostPreset_Combo.toolTip = "<p><b>Cosmetic Presets</b></p><p>Select a preset to configure Boosted controls and, where applicable, prepare Advanced controls. The visible preview is recalculated immediately. Use <b>Apply</b> in Boosted or Advanced to stack changes, or generate the final image to use the visible state.</p>";
+   this.boostPreset_Combo.enabled = false;
+   this.boostPreset_Combo.toolTip = "<p><b>Cosmetic Presets</b></p><p>Select a preset to configure Boosted controls and, where applicable, prepare Advanced controls. The visible preview is recalculated immediately. Use <b>Apply</b> in Boosted or Advanced to stack changes, or generate the final image to use the visible state.</p><p><b>Note:</b> Cosmetic Presets are enabled only after previews have been created.</p>";
    this.boostPreset_Combo.onItemSelected = function( index )
    {
+      if ( !dlg.previewsReady || dlg.previewGenerationBusy || dlg.realtimeRefreshBusy )
+         return;
       dlg.applyBoostedPresetDefinition( index );
    };
 
@@ -9551,7 +9633,10 @@ data.selectedPreviewBoosted = false;
          if ( this.resetCosmeticPreset_Button )
             this.resetCosmeticPreset_Button.enabled = false;
          if ( this.boostPreset_Combo )
+         {
             this.boostPreset_Combo.currentItem = 0;
+            this.boostPreset_Combo.enabled = false;
+         }
          if ( this.boostPresetHint_Label )
             this.boostPresetHint_Label.text = "Setup changed: create previews again before applying Boosted presets or Advanced layers.";
          if ( this.undoBoosted_Button )
@@ -9890,9 +9975,16 @@ data.selectedPreviewBoosted = false;
    this.previewAdvanced_CheckBox = new CheckBox( this );
    this.previewAdvanced_CheckBox.text = "Show advanced combinations";
    this.previewAdvanced_CheckBox.checked = data.previewShowAdvanced;
+   this.previewAdvanced_CheckBox.enabled = false;
    this.previewAdvanced_CheckBox.toolTip = "<p>Show the less common classic and Foraxx family previews. Keep this disabled for a cleaner palette-picking workflow.</p>";
    this.previewAdvanced_CheckBox.onCheck = function( checked )
    {
+      if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
+      {
+         data.previewShowAdvanced = false;
+         this.checked = false;
+         return;
+      }
       data.previewShowAdvanced = checked;
       dlg.refreshAdvancedPreviewVisibility();
       // Advanced tiles are generated on demand. If the user already created
@@ -9993,8 +10085,10 @@ data.selectedPreviewBoosted = false;
       if ( this.previewQuality_Combo ) this.previewQuality_Combo.enabled = !busy;
       if ( this.previewBoosted_CheckBox ) this.previewBoosted_CheckBox.enabled = !busy;
       if ( this.finalOutputId_Edit ) this.finalOutputId_Edit.enabled = !busy;
-      if ( this.previewAdvanced_CheckBox ) this.previewAdvanced_CheckBox.enabled = !busy;
+      if ( this.previewAdvanced_CheckBox ) this.previewAdvanced_CheckBox.enabled = !busy && this.hasLoadedLargePreviewForControls && this.hasLoadedLargePreviewForControls();
       if ( this.setBoostedControlsCalculationBusy ) this.setBoostedControlsCalculationBusy( busy );
+      if ( this.refreshAdvancedControlsState ) this.refreshAdvancedControlsState();
+      if ( this.refreshMaskControlsState ) this.refreshMaskControlsState();
       if ( this.cancel_Button ) this.cancel_Button.enabled = !busy;
       for ( var busyTi = 0; busyTi < this.previewTiles.length; ++busyTi )
          this.previewTiles[busyTi].enabled = !busy;
@@ -10687,7 +10781,7 @@ data.selectedPreviewBoosted = false;
          this.advancedPreview_Control.show();
       else
       {
-         if ( this.selectedPaletteIndex != PALETTE_ORIGINAL && this.selectedPaletteIndex != PALETTE_CLASSIC_HOO && this.selectedPaletteIndex != PALETTE_CLASSIC_SHO && this.selectedPaletteIndex != PALETTE_CLASSIC_FORAXX && this.selectedPaletteIndex != PALETTE_FORAXX_HOS )
+         if ( this.selectedPaletteIndex != PALETTE_ORIGINAL && this.selectedPaletteIndex != PALETTE_CLASSIC_HOO && this.selectedPaletteIndex != PALETTE_CLASSIC_FORAXX && this.selectedPaletteIndex != PALETTE_FORAXX_HOS )
             this.selectPreviewPalette( PALETTE_CLASSIC_HOO );
          this.advancedPreview_Control.hide();
       }
@@ -11239,6 +11333,7 @@ data.selectedPreviewBoosted = false;
       for ( var unlockTi = 0; unlockTi < this.previewTiles.length; ++unlockTi )
          this.previewTiles[unlockTi].enabled = true;
       if ( this.luckyPreview_Button ) this.luckyPreview_Button.enabled = true;
+      if ( this.previewAdvanced_CheckBox ) this.previewAdvanced_CheckBox.enabled = !!(this.hasLoadedLargePreviewForControls && this.hasLoadedLargePreviewForControls());
       if ( this.createPreviews_Button ) this.createPreviews_Button.enabled = true;
       if ( this.generateSelected_Button )
          this.generateSelected_Button.enabled = true;
@@ -11497,18 +11592,24 @@ data.selectedPreviewBoosted = false;
       this.dialog.setLayout();
    };
 
-   // Cosmetic preset guidance remains tooltip-only. Masks start open by default
-   // now that the adaptive rectangular preview layout recovers vertical space.
+   // Cosmetic preset guidance remains tooltip-only. Masks start closed by
+   // default to keep the initial production layout compact.
    if ( this.cosmeticPresets_GroupBox )
       this.cosmeticPresets_GroupBox.hide();
    if ( this.masks_GroupBox )
-      this.masks_GroupBox.show();
+      this.masks_GroupBox.hide();
    // Default mask state: section visible but no mask active.
    data.previewShowMaskPreview = false;
    if ( this.showMaskPreview_CheckBox )
       this.showMaskPreview_CheckBox.checked = false;
 
    this.refreshAdvancedControlsState();
+   if ( this.refreshMaskControlsState )
+      this.refreshMaskControlsState();
+   if ( this.setBoostedControlsCalculationBusy )
+      this.setBoostedControlsCalculationBusy( false );
+   if ( this.previewAdvanced_CheckBox )
+      this.previewAdvanced_CheckBox.enabled = false;
    if ( this.generateSelected_Button )
       this.generateSelected_Button.enabled = this.previewsReady;
    if ( this.luckyPreview_Button )
