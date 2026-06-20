@@ -17,27 +17,22 @@
  *
  *****************************************************************************/
 
-// Script originally developed and tested on PixInsight 1.8.9-1 Ripley
-// AutoPalette_Studio_v1.0.0.js
-//
-// This file is part of AutoPalette Studio Script
-//
 // Copyright (C) 2026 Raúl Hussein
-// All Rights Reserved
+// SPDX-License-Identifier: GPL-3.0-only
 //
-// ----------------------------------------------------------------------------
-// This program is free software: you can redistribute it and/or modify it
+// This file is part of AutoPalette Studio.
+//
+// AutoPalette Studio is free software: you can redistribute it and/or modify it
 // under the terms of the GNU General Public License as published by the
 // Free Software Foundation, version 3 of the License.
 //
-// This program is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// AutoPalette Studio is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+// or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
+// for more details.
 //
-// You should have received a copy of the GNU General Public License along with
-// this program.  If not, see <http://www.gnu.org/licenses/>.
-// ----------------------------------------------------------------------------
+// You should have received a copy of the GNU General Public License along
+// with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #feature-id AutoPaletteStudio : Astrocitas > AutoPalette Studio
 #feature-info AutoPalette Studio v1.0<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.

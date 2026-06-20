@@ -2,7 +2,7 @@
 
 **AutoPalette Studio** is a PixInsight script designed to create and explore narrowband color palettes from OSC dual-band images or monochrome narrowband channels.
 
-It provides an interactive workflow to generate HOO, SHO and creative narrowband palettes, with real-time previews, boosted variants and advanced color controls.
+It provides an interactive workflow to generate HOO, SHO and creative narrowband palettes like Foraxx, with real-time previews, boosted variants and advanced color controls.
 
 ## Main Features
 
