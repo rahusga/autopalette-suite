@@ -1,0 +1,30 @@
+# PixInsight image/data files
+*.xisf
+*.fit
+*.fits
+*.fz
+*.xosm
+
+# Large astro processing outputs
+*.tif
+*.tiff
+*.ser
+*.avi
+*.mp4
+
+# Local/editor files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Do not ignore documentation images
+!docs/images/*.png
+!docs/images/*.jpg
+!docs/images/*.jpeg
+!docs/images/*.webp
