@@ -22,6 +22,11 @@ It provides an interactive workflow to generate HOO, SHO and creative narrowband
 - Input data:
   - OSC dual-band image, or
   - separated Ha, OIII and optional SII monochrome channels.
+  
+## Documentation
+
+- [Installation](docs/installation.md)
+- [Usage](docs/usage.md)
 
 ## Installation
 
