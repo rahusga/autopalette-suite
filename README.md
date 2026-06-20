@@ -23,11 +23,6 @@ It provides an interactive workflow to generate HOO, SHO and creative narrowband
   - OSC dual-band image, or
   - separated Ha, OIII and optional SII monochrome channels.
   
-## Documentation
-
-- [Installation](docs/installation.md)
-- [Usage](docs/usage.md)
-
 ## Installation
 
 ### Manual installation
@@ -57,6 +52,12 @@ A PixInsight update repository will be provided in a future release.
 For best results, images should be calibrated, registered, integrated and background-corrected before using AutoPalette Studio.
 
 Linear images are supported. The script can generate suitable previews while preserving the intended processing workflow.
+
+## Full Documentation
+
+- [Installation](docs/installation.md)
+- [Usage](docs/usage.md)
+
 
 ## License
 
