@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.3 (May 2026)
+ * AutoPalette Studio version 1.0.5 (May 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -17,6 +17,8 @@
  * 1.0.1 - Hotfix: Classic SHO moved to advanced combinations; Masks closed by default.
  * 1.0.2 - Hotfix: Cosmetic Presets locked until previews are available.
  * 1.0.3 - Hotfix: Boosted, Advanced and Mask controls locked until a preview is loaded.
+ * 1.0.4 - UX: Advanced starts collapsed and initial dialog width is compact.
+ * 1.0.5 - Per: cache mask preview bitmaps.
  *
  *****************************************************************************/
 
@@ -38,7 +40,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #feature-id AutoPaletteStudio : Astrocitas > AutoPalette Studio
-#feature-info AutoPalette Studio v1.0.3<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-info AutoPalette Studio v1.0.5<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -53,7 +55,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.3"
+#define VERSION "1.0.5"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -142,6 +144,11 @@ var gActiveStarMaskViewId = "";
 var gStarMaskCacheKey = "";
 var gStarMaskCacheViewId = "";
 var gStarMaskComputationInProgress = false;
+// v1.0.5: Cache the rendered mask-preview bitmap as well. When the user keeps
+// the same palette and mask parameters active, Boosted/Advanced slider changes
+// can reuse the already rendered preview-mask bitmap instead of rebuilding it.
+var gMaskPreviewBitmapCacheKey = "";
+var gMaskPreviewBitmapCache = null;
 
 function starMaskCacheKeyForView( sourceView )
 {
@@ -171,6 +178,36 @@ function getCachedStarMaskViewForKey( key )
    gStarMaskCacheViewId = "";
    gActiveStarMaskViewId = "";
    return null;
+}
+
+function clearMaskPreviewBitmapCache()
+{
+   gMaskPreviewBitmapCacheKey = "";
+   gMaskPreviewBitmapCache = null;
+}
+
+function maskPreviewBitmapCacheKeyForView( sourceView )
+{
+   if ( !isValidView( sourceView ) )
+      return "";
+   return "maskPreview|" + starMaskCacheKeyForView( sourceView );
+}
+
+function getCachedMaskPreviewBitmapForView( sourceView )
+{
+   var key = maskPreviewBitmapCacheKeyForView( sourceView );
+   if ( key.length > 0 && key == gMaskPreviewBitmapCacheKey && gMaskPreviewBitmapCache != null )
+      return gMaskPreviewBitmapCache;
+   return null;
+}
+
+function storeMaskPreviewBitmapCacheForView( sourceView, bitmap )
+{
+   var key = maskPreviewBitmapCacheKeyForView( sourceView );
+   if ( key.length == 0 || bitmap == null )
+      return;
+   gMaskPreviewBitmapCacheKey = key;
+   gMaskPreviewBitmapCache = bitmap;
 }
 
 function invertMaskViewInPlace( view )
@@ -220,6 +257,7 @@ function invalidateStarMaskCache()
    gStarMaskCacheKey = "";
    gStarMaskCacheViewId = "";
    gActiveStarMaskViewId = "";
+   clearMaskPreviewBitmapCache();
 }
 
 function isStarMaskCacheReadyForView( sourceView )
@@ -4789,9 +4827,17 @@ function createMaskPreviewBitmap( view )
    if ( !isValidView( view ) || !isAnyMaskActive() )
       return renderStudioBitmapFromView( view, view );
 
+   var cachedBmp = getCachedMaskPreviewBitmapForView( view );
+   if ( cachedBmp != null )
+      return cachedBmp;
+
    var maskView = createSelectedMaskView( view );
    if ( isValidView( maskView ) )
-      return renderStudioBitmapFromView( maskView, view );
+   {
+      var cachedGeneratedBmp = renderStudioBitmapFromView( maskView, view );
+      storeMaskPreviewBitmapCacheForView( view, cachedGeneratedBmp );
+      return cachedGeneratedBmp;
+   }
 
    // Expression-only masks and fallback if generated mask creation fails.
    var src = view.id;
@@ -4813,6 +4859,7 @@ function createMaskPreviewBitmap( view )
       {
          win.hide();
          var bmp = renderStudioBitmapFromView( win.mainView, view );
+         storeMaskPreviewBitmapCacheForView( view, bmp );
          safeForceCloseWindowById( outId );
          return bmp;
       }
@@ -7397,6 +7444,7 @@ data.selectedPreviewBoosted = false;
       this.largePreviewBaseKey = "";
       this.largePreviewAdvancedBitmap = null;
       this.largePreviewAdvancedKey = "";
+      clearMaskPreviewBitmapCache();
       closeLayeredLargePreviewCacheViews();
       cleanupAllLargePreviewRefinedWindows();
       this.advancedPreviewPendingKey = "";
@@ -10323,30 +10371,34 @@ data.selectedPreviewBoosted = false;
       var aspect = this.getPreferredPreviewAspectFromView( sourceView );
       var targetW = 760;
       var targetH = 460;
+      var tileW = (typeof DEFAULT_TILE_WIDTH != "undefined" && DEFAULT_TILE_WIDTH > 0) ? DEFAULT_TILE_WIDTH : 174;
+      var tileGap = 6;
+      var previewColumns = 4;
+      var gridAlignedW = previewColumns*tileW + (previewColumns-1)*tileGap + 8;
 
       if ( aspect >= 1.15 )
       {
-         // RC5.4.9: rectangular images are the common case. Keep the large
-         // preview control itself close to the source aspect ratio instead of
-         // letting it expand vertically and creating black bars above/below the
-         // bitmap. The dialog remains resizable by the user.
-         targetW = 1040;
+         // v1.0.5: Keep the large preview width visually aligned with the
+         // thumbnail grid, which is the user-visible reference width in the
+         // Create Previews section. This also reduces the chance of a large
+         // vertical viewport that introduces black bars above/below the image.
+         targetW = gridAlignedW;
          targetH = Math.round( targetW / aspect );
          if ( targetH < 420 ) targetH = 420;
          if ( targetH > 620 ) targetH = 620;
       }
       else
       {
-         // Square/near-square frames get a taller viewport, but without forcing
-         // the whole dialog to become non-shrinkable.
-         targetH = 560;
-         targetW = Math.round( targetH * aspect );
-         if ( targetW < 640 ) targetW = 640;
-         if ( targetW > 1040 ) targetW = 1040;
+         // Near-square frames keep the same width reference and grow in height
+         // only as much as needed, preserving a compact production layout.
+         targetW = gridAlignedW;
+         targetH = Math.round( targetW / Math.max( 0.75, aspect ) );
+         if ( targetH < 480 ) targetH = 480;
+         if ( targetH > 700 ) targetH = 700;
       }
 
-      targetW = Math.max( 720, Math.min( 1120, targetW ) );
-      targetH = Math.max( 420, Math.min( 640, targetH ) );
+      targetW = Math.max( gridAlignedW, Math.min( 980, targetW ) );
+      targetH = Math.max( 420, Math.min( 700, targetH ) );
 
       try { this.largePreview_Control.setMinSize( targetW, targetH ); } catch ( eMin ) {}
       try { this.setVariableSize(); } catch ( eVar ) {}
@@ -10358,7 +10410,8 @@ data.selectedPreviewBoosted = false;
    };
 
    this.largePreview_Control = new Control( this );
-   this.largePreview_Control.setMinSize( 920, 520 );
+   // v1.0.5: compact startup width, aligned with the four-tile preview grid.
+   this.largePreview_Control.setMinSize( 720, 520 );
    this.largePreview_Control.toolTip = "<p>Large preview. Use mouse wheel or the zoom buttons to zoom, drag with the mouse to pan, double-click for Fit, press 1:1 for full-size preview and click a point to center it.</p>";
    this.largePreview_Control.ownerDialog = this;
    this.largePreview_Control.onPaint = function()
@@ -10641,6 +10694,10 @@ data.selectedPreviewBoosted = false;
             advRow.add( spacer );
          }
       }
+      // Keep advanced rows using the same left-aligned grid behavior as the
+      // main preview row, so all advanced combination tiles stay visually
+      // aligned when the dialog is resized.
+      advRow.addStretch();
       this.advancedPreview_Control.sizer.add( advRow );
    }
 
@@ -11596,6 +11653,9 @@ data.selectedPreviewBoosted = false;
    // default to keep the initial production layout compact.
    if ( this.cosmeticPresets_GroupBox )
       this.cosmeticPresets_GroupBox.hide();
+   // v1.0.4: Advanced starts collapsed; it is available after previews are loaded.
+   if ( this.advancedControls_GroupBox )
+      this.advancedControls_GroupBox.hide();
    if ( this.masks_GroupBox )
       this.masks_GroupBox.hide();
    // Default mask state: section visible but no mask active.

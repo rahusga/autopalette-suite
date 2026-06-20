@@ -21,19 +21,11 @@
 - Improved cleanup of intermediate views.
 - Reduced preview mismatch in final generated images.
 
-## [1.0.1] - 2026-06-20
+## [1.0.1-5] - 2026-06-20
 
 ### Fixed
 - Classic SHO moved to advanced combinations; Masks closed by default.
-
-## [1.0.2] - 2026-06-20
-
-### Fixed
-
 - Cosmetic Presets locked until previews are available.
-
-## [1.0.1] - 2026-06-20
-
-### Fixed
-
 - Boosted, Advanced and Mask controls locked until a preview is loaded.
+- UX: Advanced starts collapsed and initial dialog width is compact.
+- Per: cache mask preview bitmaps.
