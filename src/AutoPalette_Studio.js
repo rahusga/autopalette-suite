@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.5 (May 2026)
+ * AutoPalette Studio version 1.0.6 (May 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -18,7 +18,9 @@
  * 1.0.2 - Hotfix: Cosmetic Presets locked until previews are available.
  * 1.0.3 - Hotfix: Boosted, Advanced and Mask controls locked until a preview is loaded.
  * 1.0.4 - UX: Advanced starts collapsed and initial dialog width is compact.
- * 1.0.5 - Per: cache mask preview bitmaps.
+ * 1.0.4.1 - UI: Advanced combination preview rows use the same aligned grid layout.
+ * 1.0.5 - Perf/UI: cache mask preview bitmaps and align large preview width to the thumbnail grid.
+ * 1.0.6 - UI: add documentation button and Suite Astrocitas SVG feature icon.
  *
  *****************************************************************************/
 
@@ -39,8 +41,9 @@
 // You should have received a copy of the GNU General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#feature-id AutoPaletteStudio : Astrocitas > AutoPalette Studio
-#feature-info AutoPalette Studio v1.0.5<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-id AutoPaletteStudio : Suite Astrocitas > AutoPalette Studio
+#feature-icon icons/AutoPaletteStudio.svg
+#feature-info AutoPalette Studio v1.0.6<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -55,7 +58,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.5"
+#define VERSION "1.0.6"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -11454,6 +11457,15 @@ data.selectedPreviewBoosted = false;
        this.dialog.newInstance();
     };
 
+    this.help_Button = new ToolButton( this );
+    this.help_Button.icon = this.scaledResource( ":/process-interface/browse-documentation.png" );
+    this.help_Button.setScaledFixedSize( 20, 20 );
+    this.help_Button.toolTip = "Browse Documentation";
+    this.help_Button.onClick = function()
+    {
+       Dialog.browseScriptDocumentation( "AutoPaletteStudio" );
+    };
+
     this.buttons_Sizer = new HorizontalSizer;
     this.buttons_Sizer.spacing = 6;
     this.buttons_Sizer.add(this.finalOutputId_Label);
@@ -11583,7 +11595,12 @@ data.selectedPreviewBoosted = false;
         add(this.masks_SectionBar);
         add(this.masks_GroupBox);
         addStretch();
-        add(this.newInstanceButton);
+        this.leftBottomTools_Sizer = new HorizontalSizer;
+        this.leftBottomTools_Sizer.spacing = 6;
+        this.leftBottomTools_Sizer.add( this.newInstanceButton );
+        this.leftBottomTools_Sizer.add( this.help_Button );
+        this.leftBottomTools_Sizer.addStretch();
+        add( this.leftBottomTools_Sizer );
     }
 
     this.rightPanel_Sizer = new VerticalSizer;
