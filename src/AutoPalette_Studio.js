@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.6 (May 2026)
+ * AutoPalette Studio version 1.0.7 (Jun 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -21,6 +21,9 @@
  * 1.0.4.1 - UI: Advanced combination preview rows use the same aligned grid layout.
  * 1.0.5 - Perf/UI: cache mask preview bitmaps and align large preview width to the thumbnail grid.
  * 1.0.6 - UI: add documentation button and Suite Astrocitas SVG feature icon.
+ * 1.0.7 - UX/Bugfix: Balanced preview by default, safer preview-quality
+ *       rebuilds, improved Advanced Undo/Redo state, and clearer manual
+ *       Apply-only behaviour for Advanced controls.
  *
  *****************************************************************************/
 
@@ -43,7 +46,7 @@
 
 #feature-id AutoPaletteStudio : Suite Astrocitas > AutoPalette Studio
 #feature-icon icons/AutoPaletteStudio.svg
-#feature-info AutoPalette Studio v1.0.6<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-info AutoPalette Studio v1.0.7<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -58,7 +61,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.6"
+#define VERSION "1.0.7"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -2825,13 +2828,6 @@ function createDirectMonoOriginalBoostedViewFromBase( baseView, outId, includeGo
       {
          if ( data.previewAdvancedLayerStack != null && data.previewAdvancedLayerStack.length > 0 )
             applyAdvancedLayerStackToView( outView );
-         else
-         {
-            if ( data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6 )
-               applyGoldAccentOnlyToView( outView );
-            if ( isChannelLightnessActive() )
-               applyChannelLightnessOnlyToView( outView );
-         }
       }
    }
 
@@ -4390,6 +4386,10 @@ function previewStructuralBaseParameterKeyForView( view, skipAdvancedStack )
 {
    return JSON.stringify( {
       viewId: isValidView( view ) ? view.id : "",
+      viewWidth: isValidView( view ) ? view.image.width : 0,
+      viewHeight: isValidView( view ) ? view.image.height : 0,
+      viewChannels: isValidView( view ) ? view.image.numberOfChannels : 0,
+      previewQuality: data.previewQuality,
       skipAdvancedStack: !!skipAdvancedStack,
       scnr: data.previewSCNR,
       oiii: data.previewOIIIBoost,
@@ -4515,6 +4515,10 @@ function previewColorBaseParameterKeyForView( view, skipAdvancedStack )
 {
    return JSON.stringify( {
       viewId: isValidView( view ) ? view.id : "",
+      viewWidth: isValidView( view ) ? view.image.width : 0,
+      viewHeight: isValidView( view ) ? view.image.height : 0,
+      viewChannels: isValidView( view ) ? view.image.numberOfChannels : 0,
+      previewQuality: data.previewQuality,
       skipAdvancedStack: !!skipAdvancedStack,
       scnr: data.previewSCNR,
       oiii: data.previewOIIIBoost,
@@ -4940,6 +4944,13 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
    tmpData.previewSilent = true;
 
    var goldEnabled = !skipAdvancedStack && data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6;
+   var channelLightnessEnabled = !skipAdvancedStack && isChannelLightnessActive();
+   var advancedStackEnabled = !skipAdvancedStack && data.previewAdvancedLayerStack != null && data.previewAdvancedLayerStack.length > 0;
+   // Advanced controls are Apply-only. Current checkbox/slider values are
+   // not part of normal realtime Boosted refreshes; they are rendered only
+   // while Apply is committing the pending layer.
+   var pendingAdvancedEnabled = (goldEnabled || channelLightnessEnabled) &&
+                                data.previewForcePendingAdvancedLayer === true;
 
    try
    {
@@ -5045,9 +5056,8 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
 
          if ( isValidView( toneView ) )
          {
-            var needsFinalWorkingCopy = hasColorBalanceRefinementsToApply() || goldEnabled ||
-                                        (!skipAdvancedStack && isChannelLightnessActive()) ||
-                                        data.previewAutoStretch;
+            var needsFinalWorkingCopy = hasColorBalanceRefinementsToApply() || advancedStackEnabled ||
+                                        pendingAdvancedEnabled || data.previewAutoStretch;
             if ( !needsFinalWorkingCopy )
             {
                // RC5.2: when the cached tone view is already the final display
@@ -5068,10 +5078,15 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
                if ( isValidWindow( colorView.window ) ) colorView.window.hide();
                var colorWarmMaskView = hasColorBalanceRefinementsToApply() ? getOrCreateLargePreviewWarmMaskView( toneView, toneKey ) : null;
                applyPreviewColorBalanceOnlyToView( colorView, colorWarmMaskView );
-               if ( goldEnabled )
-                  applyGoldAccentOnlyToView( colorView );
-               if ( !skipAdvancedStack )
-                  applyChannelLightnessOnlyToView( colorView );
+               if ( advancedStackEnabled )
+                  applyAdvancedLayerStackToView( colorView );
+               if ( pendingAdvancedEnabled )
+               {
+                  if ( goldEnabled )
+                     applyGoldAccentOnlyToView( colorView );
+                  if ( channelLightnessEnabled )
+                     applyChannelLightnessOnlyToView( colorView );
+               }
                if ( data.previewAutoStretch )
                   applyDisplayAutoStretchToView( colorView, shouldUseLinkedSHODisplayStretch(), "large refined display" );
                apsProfileLog( "large preview final working layer", apsFinalLayerStart );
@@ -5126,10 +5141,15 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
             gLastLargePreviewRefinedViewId = outId;
             if ( isValidWindow( colorViewLegacy.window ) ) colorViewLegacy.window.hide();
             applyPreviewColorBalanceOnlyToView( colorViewLegacy );
-            if ( goldEnabled )
-               applyGoldAccentOnlyToView( colorViewLegacy );
-            if ( !skipAdvancedStack )
-               applyChannelLightnessOnlyToView( colorViewLegacy );
+            if ( advancedStackEnabled )
+               applyAdvancedLayerStackToView( colorViewLegacy );
+            if ( pendingAdvancedEnabled )
+            {
+               if ( goldEnabled )
+                  applyGoldAccentOnlyToView( colorViewLegacy );
+               if ( channelLightnessEnabled )
+                  applyChannelLightnessOnlyToView( colorViewLegacy );
+            }
             if ( data.previewAutoStretch )
                applyDisplayAutoStretchToView( colorViewLegacy, shouldUseLinkedSHODisplayStretch(), "large refined display" );
             var apsLegacyBmp = renderStudioBitmapFromView( colorViewLegacy, view );
@@ -5165,9 +5185,7 @@ function hasPreviewRefinementsToApply()
           Math.abs((data.previewContrast || 1.0)-1.0) > 1e-6 ||
           Math.abs((data.previewSaturation || 1.0)-1.0) > 1e-6 ||
           Math.abs((data.previewCyanGoldBalance || 0.0)) > 1e-6 ||
-          Math.abs((data.previewRedYellowBalance || 0.0)) > 1e-6 ||
-          (data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6) ||
-          isChannelLightnessActive();
+          Math.abs((data.previewRedYellowBalance || 0.0)) > 1e-6;
 }
 
 
@@ -5799,6 +5817,28 @@ function applyPreviewBaseRefinementsStagedToView( view )
    return didSomething;
 }
 
+function advancedLayerEquals( a, b )
+{
+   if ( a == null || b == null )
+      return false;
+   return (!!a.goldEnabled == !!b.goldEnabled) &&
+          Math.abs((a.goldAmount || 0.0) - (b.goldAmount || 0.0)) < 1e-6 &&
+          (!!a.channelEnabled == !!b.channelEnabled) &&
+          ((a.channelSource || 0) == (b.channelSource || 0)) &&
+          Math.abs((a.channelAmount || 0.0) - (b.channelAmount || 0.0)) < 1e-6;
+}
+
+function currentAdvancedLayerAlreadyCommitted()
+{
+   var current = captureCurrentAdvancedLayer();
+   if ( !(current.goldEnabled || current.channelEnabled) )
+      return true;
+   var stack = data.previewAdvancedLayerStack || [];
+   if ( stack.length == 0 )
+      return false;
+   return advancedLayerEquals( current, stack[stack.length-1] );
+}
+
 function applyPreviewRefinementsToView( view )
 {
    if ( !isValidView( view ) || view.image.numberOfChannels != 3 )
@@ -5825,19 +5865,19 @@ function applyPreviewRefinementsToView( view )
 
    applyPreviewColorBalanceOnlyToView( view );
 
-   // Advanced stack. If the user has applied several Advanced layers in Studio,
-   // replay them sequentially so the final image follows the accumulated preview.
+   // Advanced stack. Replay committed layers first. If the user has edited an
+   // Advanced layer in realtime but has not pressed Apply yet, also apply the
+   // pending visible layer unless it is identical to the last committed layer.
    if ( data.previewAdvancedLayerStack != null && data.previewAdvancedLayerStack.length > 0 )
-   {
       applyAdvancedLayerStackToView( view );
-      return;
-   }
 
-   // No committed Advanced stack yet: apply the currently enabled Advanced layer.
-   if ( goldEnabled )
-      applyGoldAccentOnlyToView( view );
-   if ( channelLightnessEnabled )
-      applyChannelLightnessOnlyToView( view );
+   if ( (goldEnabled || channelLightnessEnabled) && !currentAdvancedLayerAlreadyCommitted() )
+   {
+      if ( goldEnabled )
+         applyGoldAccentOnlyToView( view );
+      if ( channelLightnessEnabled )
+         applyChannelLightnessOnlyToView( view );
+   }
 }
 
 function isFinalPaletteOutputId( id )
@@ -6313,7 +6353,7 @@ function parametersPrototype()
       this.previewShowAdvanced = false;
       // RC5.2.3: keep boosted variants opt-in so initial preview creation is faster.
       this.previewShowBoosted = false;
-      this.previewQuality = PREVIEW_QUALITY_FAST;
+      this.previewQuality = PREVIEW_QUALITY_BALANCED;
       this.previewBoostRangeMode = BOOST_RANGE_BALANCED;
       this.previewShowAdvancedControls = true;
       this.previewEnableSIIAccent = false;
@@ -7647,6 +7687,10 @@ data.selectedPreviewBoosted = false;
          palette: this.selectedPaletteIndex,
          boosted: this.selectedPaletteBoosted,
          sourceId: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.id : "",
+         sourceWidth: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.image.width : 0,
+         sourceHeight: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.image.height : 0,
+         sourceChannels: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.image.numberOfChannels : 0,
+         previewQuality: data.previewQuality,
          frozenAdvanced: this.isFrozenAdvancedBaseUsable ? (this.isFrozenAdvancedBaseUsable() ? this.frozenAdvancedBaseKey : "") : "",
          showOriginal: data.previewShowLastPreview,
          autoStretch: data.previewAutoStretch,
@@ -7664,19 +7708,26 @@ data.selectedPreviewBoosted = false;
          maskPreset: data.previewMaskPreset || 0,
          maskAmount: data.previewStarProtectionAmount,
          showMask: data.previewShowMaskPreview,
-         invertMask: data.previewInvertMask
+         invertMask: data.previewInvertMask,
+
+         // Keep Advanced stack/control state in the normal realtime cache
+         // key so explicit Advanced Apply and subsequent Boosted refreshes
+         // cannot collide with stale Boosted-only cached bitmaps.
+         advancedStackDepth: ((data.previewAdvancedLayerStack != null) ? data.previewAdvancedLayerStack.length : 0),
+         advancedGoldEnabled: data.previewEnableSIIAccent,
+         advancedGoldAmount: data.previewSIIHighlightAccent,
+         advancedStructureEnabled: data.previewEnableChannelLightness,
+         advancedStructureSource: data.previewChannelLightnessSource,
+         advancedStructureAmount: data.previewChannelLightnessAmount
       } );
    };
 
    this.advancedPreviewParameterKey = function()
    {
-      return this.realtimePreviewParameterKey() +
-             "|advGold=" + (data.previewEnableSIIAccent ? "1" : "0") +
-             "|goldAccent=" + formatFloat( data.previewSIIHighlightAccent || 0.0, 3 ) +
-             "|advCL=" + (data.previewEnableChannelLightness ? "1" : "0") +
-             "|clSrc=" + (data.previewChannelLightnessSource || 0) +
-             "|clAmt=" + formatFloat( data.previewChannelLightnessAmount || 0.0, 3 ) +
-             "|stackDepth=" + ((data.previewAdvancedLayerStack != null) ? data.previewAdvancedLayerStack.length : 0);
+      // Kept as a semantic alias for Advanced-specific timers/apply logic.
+      // realtimePreviewParameterKey() already includes the Advanced state in
+      // so base/advanced cache entries cannot collide.
+      return this.realtimePreviewParameterKey();
    };
 
    this.invalidateAdvancedPreviewCache = function()
@@ -7719,11 +7770,14 @@ data.selectedPreviewBoosted = false;
 
    this.refreshTransientAdvancedPreview = function()
    {
-      /* RC5.0.1 legacy helper retained but no longer called by Enable
-       * checkboxes in RC5.1.1. Advanced controls are Apply-only again.
+      /* Realtime Advanced preview helper. This renders the currently enabled
+       * Advanced controls over the visible preview without pushing anything to
+       * the Advanced stack. Apply remains the explicit commit/stack action.
        */
       this.syncAdvancedControlValues();
-      this.invalidateAdvancedPreviewCache();
+      // Do not invalidate here: callers invalidate when a control actually
+      // changes. This allows same-key Advanced renders to be reused and avoids
+      // visible flicker after the debounce timer fires.
       if ( this.realtimePreviewTimer )
          this.realtimePreviewTimer.stop();
       if ( this.applySIIAccent_Timer )
@@ -7766,6 +7820,14 @@ data.selectedPreviewBoosted = false;
       finally
       {
          data.previewSIIAccentActive = oldActive;
+         // An Advanced render is authoritative for the current visible state.
+         // Drop any stale base/Boosted realtime refresh queued while the
+         // Advanced PixelMath pass was running; otherwise it can overwrite
+         // the correct Structure Lift/Gold Accent preview shortly afterwards.
+         this.realtimeRefreshQueued = false;
+         this.realtimeRefreshQueuedForce = false;
+         if ( this.realtimePreviewTimer )
+            this.realtimePreviewTimer.stop();
          this.realtimePreviewCalculating = false;
          this.showAdvancedCalculatingOverlay = false;
          this.previewOverlayMessage = "Calculating preview...";
@@ -8307,7 +8369,7 @@ data.selectedPreviewBoosted = false;
          dlg.invalidateAdvancedPreviewCache();
          dlg.refreshAdvancedControlsState();
       };
-   this.previewSIIHighlightAccent_Control.toolTip = "<p>Selective gold/yellow accent using a ColorMask + RGB/H curves style transformation. Now updates the preview with a short debounce when Gold Accent is enabled. This version applies a stronger internal Gold Accent response (+50%) while keeping the same slider range.</p>";
+   this.previewSIIHighlightAccent_Control.toolTip = "<p>Selective gold/yellow accent using a ColorMask + RGB/H curves style transformation. For performance, changing this slider does not refresh the preview until you press Apply. This version applies a stronger internal Gold Accent response (+50%) while keeping the same slider range.</p>";
 
    this.channelLightnessTitle_Label = new Label( this );
    this.channelLightnessTitle_Label.useRichText = true;
@@ -8352,15 +8414,14 @@ data.selectedPreviewBoosted = false;
    this.previewChannelLightnessAmount_Control.setPrecision( 3 );
    this.previewChannelLightnessAmount_Control.slider.setRange( 0, 10000 );
    this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
-   this.previewChannelLightnessAmount_Control.toolTip = "<p><b>Structure amount</b></p>Controls the selective structure lift guided by the chosen source. SII, OIII and Ha are implemented. OIII is tuned to emphasize blue/cyan inner structure. For performance, changing this slider does not refresh the preview until you press <b>Apply Advanced</b>.</p>";
+   this.previewChannelLightnessAmount_Control.toolTip = "<p><b>Structure amount</b></p>Controls the selective structure lift guided by the chosen source. SII, OIII and Ha are implemented. OIII is tuned to emphasize blue/cyan inner structure. For performance, changing this slider does not refresh the preview until you press <b>Apply</b>.</p>";
    this.previewChannelLightnessAmount_Control.onValueUpdated = function( value )
    {
       data.previewChannelLightnessAmount = value;
       dlg.invalidateAdvancedPreviewCache();
-      // v0.13.45: Structure Lift is intentionally manual-apply for now.
-      // Moving the slider should only mark the advanced cache dirty and keep
-      // the current preview responsive. The effect is refreshed when the user
-      // explicitly presses Apply Advanced.
+      // Structure Lift is manual Apply-only. Moving the slider only marks the
+      // Advanced cache dirty and keeps Boosted controls responsive. The effect
+      // is refreshed when Apply is pressed.
       dlg.refreshAdvancedControlsState();
    };
    if ( this.previewChannelLightnessAmount_Control.edit )
@@ -8385,34 +8446,13 @@ data.selectedPreviewBoosted = false;
       if ( key == "" )
          key = this.advancedPreviewParameterKey();
 
-      // If nothing changed since the last applied/cached advanced preview,
-      // do not recompute the Advanced stack again.
-      if ( this.largePreviewAdvancedBitmap != null && this.largePreviewAdvancedKey == key )
-      {
-         this.largePreviewBitmap = this.largePreviewAdvancedBitmap;
-         this.advancedPreviewLastAppliedKey = key;
-         this.realtimePreviewCalculating = false;
-         this.showAdvancedCalculatingOverlay = false;
-         if ( this.applySIIAccent_Button )
-            this.applySIIAccent_Button.enabled = isAnyAdvancedPreviewActive();
-         if ( this.largePreview_Control )
-            this.largePreview_Control.update();
-         this.advancedPreviewBusy = false;
-         return;
-      }
-      if ( this.advancedPreviewLastAppliedKey == key )
-      {
-         this.realtimePreviewCalculating = false;
-         this.showAdvancedCalculatingOverlay = false;
-         if ( this.applySIIAccent_Button )
-            this.applySIIAccent_Button.enabled = isAnyAdvancedPreviewActive();
-         this.advancedPreviewBusy = false;
-         return;
-      }
-
+      // Apply Advanced is a commit operation. Even if the same visual state is
+      // already cached, pressing Apply must still push it onto the Advanced
+      // layer stack.
       this.pushAdvancedUndoState();
       var currentLayer = captureCurrentAdvancedLayer();
       data.previewSIIAccentActive = true;
+      data.previewForcePendingAdvancedLayer = true;
       try
       {
          if ( this.isFrozenAdvancedBaseUsable() )
@@ -8478,6 +8518,7 @@ data.selectedPreviewBoosted = false;
       finally
       {
          data.previewSIIAccentActive = false;
+         data.previewForcePendingAdvancedLayer = false;
          data.previewRefinementOverrideValues = null;
          this.realtimePreviewCalculating = false;
          this.showAdvancedCalculatingOverlay = false;
@@ -8511,6 +8552,26 @@ data.selectedPreviewBoosted = false;
       }
    };
 
+   this.advancedRealtimePreview_Timer = new Timer();
+   // Advanced effects are intentionally not launched from slider edits. Keep
+   // this timer available for compatibility with legacy/preset paths only.
+   this.advancedRealtimePreview_Timer.interval = APS_REALTIME_PREVIEW_DEBOUNCE_SECONDS;
+   this.advancedRealtimePreview_Timer.periodic = false;
+   this.advancedRealtimePreview_Timer.dialog = this;
+   this.advancedRealtimePreview_Timer.onTimeout = function()
+   {
+      this.stop();
+      try
+      {
+         if ( this.dialog && this.dialog.refreshTransientAdvancedPreview )
+            this.dialog.refreshTransientAdvancedPreview();
+      }
+      catch ( e )
+      {
+         Console.warningln( "Advanced realtime preview refresh aborted: ", e );
+      }
+   };
+
    this.applyAdvancedPreviewNow = function( showOverlay )
    {
       if ( !this.hasLoadedLargePreviewForControls || !this.hasLoadedLargePreviewForControls() )
@@ -8535,16 +8596,6 @@ data.selectedPreviewBoosted = false;
          this.lastPreview_CheckBox.checked = false;
 
       var key = this.advancedPreviewParameterKey();
-      if ( this.largePreviewAdvancedBitmap != null && this.largePreviewAdvancedKey == key )
-      {
-         this.largePreviewBitmap = this.largePreviewAdvancedBitmap;
-         this.advancedPreviewLastAppliedKey = key;
-         if ( this.largePreview_Control )
-            this.largePreview_Control.update();
-         this.refreshAdvancedControlsState();
-         return;
-      }
-
       this.advancedPreviewPendingKey = key;
       if ( this.realtimePreviewTimer )
          this.realtimePreviewTimer.stop();
@@ -8561,54 +8612,23 @@ data.selectedPreviewBoosted = false;
 
    this.scheduleAdvancedPreviewRefresh = function( forceRefresh )
    {
+      // Advanced is manual Apply-only. Keep this function as a safe
+      // compatibility hook for preset/legacy paths, but do not launch realtime
+      // Advanced rendering from checkbox or slider edits.
       if ( this.realtimeRefreshSuspended )
          return;
       if ( !this.hasLoadedLargePreviewForControls || !this.hasLoadedLargePreviewForControls() )
          return;
 
       this.syncAdvancedControlValues();
-
-      if ( !isAnyAdvancedPreviewActive() )
-      {
-         // Do not destroy/leave the frozen stack just because no checkbox is
-         // currently selected. Enable is only an Apply selector now.
-         data.previewSIIAccentActive = false;
+      this.invalidateAdvancedPreviewCache();
+      this.advancedPreviewPendingKey = this.advancedPreviewParameterKey();
+      this.advancedPreviewRefreshQueued = false;
+      if ( this.advancedRealtimePreview_Timer )
+         this.advancedRealtimePreview_Timer.stop();
+      if ( this.applySIIAccent_Timer )
          this.applySIIAccent_Timer.stop();
-         this.advancedPreviewPendingKey = "";
-         this.advancedPreviewRefreshQueued = false;
-         if ( this.isFrozenAdvancedBaseUsable() )
-            this.refreshLargePreviewBoost( true );
-         else
-            this.showBasePreviewFromCacheOrRefresh();
-         this.refreshAdvancedControlsState();
-         return;
-      }
-
-      var key = this.advancedPreviewParameterKey();
-      if ( !forceRefresh && this.largePreviewAdvancedBitmap != null && this.largePreviewAdvancedKey == key )
-      {
-         this.showAdvancedPreviewFromCacheOrBase();
-         this.advancedPreviewPendingKey = key;
-         this.advancedPreviewLastAppliedKey = key;
-         this.advancedPreviewRefreshQueued = false;
-         return;
-      }
-
-      if ( !forceRefresh && this.advancedPreviewRefreshQueued && this.advancedPreviewPendingKey == key )
-         return;
-
-      if ( forceRefresh )
-      {
-         this.applySIIAccent_Timer.stop();
-         this.advancedPreviewRefreshQueued = false;
-         this.applyAdvancedPreviewNow( false );
-         return;
-      }
-
-      this.advancedPreviewPendingKey = key;
-      this.advancedPreviewRefreshQueued = true;
-      this.applySIIAccent_Timer.stop();
-      this.applySIIAccent_Timer.start();
+      this.refreshAdvancedControlsState();
    };
 
    this.applySIIAccent_Button = new ToolButton( this );
@@ -8657,9 +8677,19 @@ data.selectedPreviewBoosted = false;
    this.advancedWarning_Label.hide();
    this.advancedWarning_Label.toolTip = "Advanced operations are applied as a compact post-processing stack. Gold Accent uses an optimized mask + PixInsight Convolution pass; Structure Lift currently implements SII, OIII and Ha with source-specific color separation.";
 
+   this.advancedApplyHint_Label = new Label( this );
+   this.advancedApplyHint_Label.backgroundColor = SECTION_BODY_BG;
+   this.advancedApplyHint_Label.textColor = 0xff505050;
+   this.advancedApplyHint_Label.useRichText = true;
+   this.advancedApplyHint_Label.textAlignment = TextAlign_Right|TextAlign_VertCenter;
+   this.advancedApplyHint_Label.text = "Press <b>Apply</b> to preview/apply results";
+   this.advancedApplyHint_Label.toolTip = "Advanced controls are not realtime. Adjust the checkboxes/sliders, then press Apply to calculate and stack the layer over the current preview.";
+
    this.applySIIAccent_Sizer = new HorizontalSizer;
    this.applySIIAccent_Sizer.spacing = 6;
    this.applySIIAccent_Sizer.addStretch();
+   this.applySIIAccent_Sizer.add( this.advancedApplyHint_Label );
+   this.applySIIAccent_Sizer.addSpacing( 4 );
    this.applySIIAccent_Sizer.add( this.applySIIAccent_Button );
    this.applySIIAccent_Sizer.addSpacing( 8 );
    this.applySIIAccent_Sizer.add( this.undoAdvanced_Button );
@@ -9514,6 +9544,9 @@ data.selectedPreviewBoosted = false;
          palette: this.selectedPaletteIndex,
          boostedVariant: this.selectedPaletteBoosted,
          sourceId: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.id : "",
+         sourceWidth: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.image.width : 0,
+         sourceHeight: isValidView( this.largePreviewSourceView ) ? this.largePreviewSourceView.image.height : 0,
+         previewQuality: data.previewQuality,
          showOriginal: data.previewShowLastPreview
       } );
    };
@@ -9583,6 +9616,8 @@ data.selectedPreviewBoosted = false;
             this.realtimePreviewTimer.stop();
          if ( this.applySIIAccent_Timer )
             this.applySIIAccent_Timer.stop();
+         if ( this.advancedRealtimePreview_Timer )
+            this.advancedRealtimePreview_Timer.stop();
          if ( this.previewToast_Timer )
             this.previewToast_Timer.stop();
 
@@ -9771,13 +9806,46 @@ data.selectedPreviewBoosted = false;
 
 
 
+   this.captureAdvancedControlsState = function()
+   {
+      return {
+         enableGold: data.previewEnableSIIAccent,
+         goldAmount: data.previewSIIHighlightAccent,
+         enableStructure: data.previewEnableChannelLightness,
+         structureSource: data.previewChannelLightnessSource,
+         structureAmount: data.previewChannelLightnessAmount,
+         showOriginal: data.previewShowLastPreview
+      };
+   };
+
+   this.restoreAdvancedControlsState = function( c )
+   {
+      if ( c == null )
+         return;
+      this.realtimeRefreshSuspended = true;
+      data.previewEnableSIIAccent = !!c.enableGold;
+      data.previewSIIHighlightAccent = (c.goldAmount != null) ? c.goldAmount : 0.0;
+      data.previewEnableChannelLightness = !!c.enableStructure;
+      data.previewChannelLightnessSource = (c.structureSource != null) ? c.structureSource : 0;
+      data.previewChannelLightnessAmount = (c.structureAmount != null) ? c.structureAmount : 0.0;
+      data.previewShowLastPreview = !!c.showOriginal;
+      if ( this.enableSIIAccent_CheckBox ) this.enableSIIAccent_CheckBox.checked = data.previewEnableSIIAccent;
+      if ( this.previewSIIHighlightAccent_Control ) this.previewSIIHighlightAccent_Control.setValue( data.previewSIIHighlightAccent );
+      if ( this.enableChannelLightness_CheckBox ) this.enableChannelLightness_CheckBox.checked = data.previewEnableChannelLightness;
+      if ( this.channelLightnessSource_Combo ) this.channelLightnessSource_Combo.currentItem = data.previewChannelLightnessSource;
+      if ( this.previewChannelLightnessAmount_Control ) this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
+      if ( this.lastPreview_CheckBox ) this.lastPreview_CheckBox.checked = data.previewShowLastPreview;
+      this.realtimeRefreshSuspended = false;
+   };
+
    this.pushAdvancedUndoState = function()
    {
       var state = {
          viewId: "",
          key: this.frozenAdvancedBaseKey,
          baseline: this.frozenAdvancedBoostBaseline,
-         layers: cloneAdvancedLayerStack( data.previewAdvancedLayerStack || [] )
+         layers: cloneAdvancedLayerStack( data.previewAdvancedLayerStack || [] ),
+         controls: this.captureAdvancedControlsState()
       };
 
       if ( isValidView( this.frozenAdvancedSourceView ) )
@@ -9802,7 +9870,8 @@ data.selectedPreviewBoosted = false;
          viewId: "",
          key: this.frozenAdvancedBaseKey,
          baseline: this.frozenAdvancedBoostBaseline,
-         layers: cloneAdvancedLayerStack( data.previewAdvancedLayerStack || [] )
+         layers: cloneAdvancedLayerStack( data.previewAdvancedLayerStack || [] ),
+         controls: this.captureAdvancedControlsState()
       };
       if ( isValidView( this.frozenAdvancedSourceView ) )
       {
@@ -9821,6 +9890,7 @@ data.selectedPreviewBoosted = false;
       safeForceCloseWindowById( PREVIEW_PREFIX + "FROZEN_ADVANCED" );
 
       data.previewAdvancedLayerStack = cloneAdvancedLayerStack( state.layers || [] );
+      this.restoreAdvancedControlsState( state.controls );
       this.frozenAdvancedSourceView = null;
       this.frozenAdvancedBaseKey = state.key || "";
       this.frozenAdvancedBoostBaseline = state.baseline || null;
@@ -10006,12 +10076,12 @@ data.selectedPreviewBoosted = false;
 
    this.previewQuality_Combo = new ComboBox( this );
    this.previewQuality_Combo.editEnabled = false;
-   this.previewQuality_Combo.toolTip = "<p>Select the working size used for preview generation.</p><p><b>Fast</b> is recommended while testing and tuning. Final images are always generated at full resolution.</p>";
+   this.previewQuality_Combo.toolTip = "<p>Select the working size used for preview generation.</p><p><b>Balanced</b> is the default mode: sharper than Fast while remaining responsive. Final images are always generated at full resolution.</p>";
    this.previewQuality_Combo.addItem( "Fast" );
    this.previewQuality_Combo.addItem( "Balanced" );
    this.previewQuality_Combo.addItem( "Quality" );
    if ( data.previewQuality < PREVIEW_QUALITY_FAST || data.previewQuality > PREVIEW_QUALITY_QUALITY )
-      data.previewQuality = PREVIEW_QUALITY_FAST;
+      data.previewQuality = PREVIEW_QUALITY_BALANCED;
    this.previewQuality_Combo.currentItem = data.previewQuality;
    this.previewQuality_Combo.onItemSelected = function( index )
    {
@@ -10856,10 +10926,10 @@ data.selectedPreviewBoosted = false;
          return;
       }
 
-      // Gold Accent is an on-demand advanced calculation. Do not satisfy it
-      // from the normal realtime/base bitmap cache, whose key intentionally
-      // excludes the advanced state. This was causing Apply Advanced to flash
-      // "Calculating" and immediately restore the base preview.
+      // Gold Accent/Structure Lift are Advanced calculations. The normal
+      // realtime key also includes Advanced state so queued Boosted/base
+      // refreshes cannot overwrite the currently visible Advanced preview.
+      // Still avoid cache hits during explicit Advanced calculation/Apply.
       var isAdvancedCalculation = data.previewSIIAccentActive === true;
       var key = isAdvancedCalculation ? this.advancedPreviewParameterKey() : this.realtimePreviewParameterKey();
       var cached = isAdvancedCalculation ? null : this.getLargePreviewCache( key );
@@ -11018,33 +11088,100 @@ data.selectedPreviewBoosted = false;
       if ( this.previewGenerationBusy )
          return;
 
-      this.showLargePreviewLoading( "Calculating preview..." );
-      this.clearLargePreviewCache();
+      var saved = {
+         palette: this.selectedPaletteIndex,
+         boosted: this.selectedPaletteBoosted,
+         zoom: this.previewZoom,
+         panX: this.previewPanX,
+         panY: this.previewPanY,
+         boostedControls: this.captureBoostedControlsState(),
+         advancedControls: this.captureAdvancedControlsState ? this.captureAdvancedControlsState() : null,
+         advancedStack: cloneAdvancedLayerStack( data.previewAdvancedLayerStack || [] ),
+         showAdvanced: data.previewShowAdvanced,
+         showMask: data.previewShowMaskPreview,
+         maskEnabled: data.previewEnableMaskProtection || data.previewEnableStarProtection,
+         maskPreset: data.previewMaskPreset,
+         maskAmount: data.previewStarProtectionAmount,
+         invertMask: data.previewInvertMask,
+         finalOutputId: data.finalOutputId
+      };
 
-      var pData = createPreviewSourceData( data );
-      if ( pData == null )
+      this.showLargePreviewLoading( "Rebuilding previews at " + getPreviewQualityLabel() + " quality..." );
+      if ( this.realtimePreviewTimer ) this.realtimePreviewTimer.stop();
+      if ( this.applySIIAccent_Timer ) this.applySIIAccent_Timer.stop();
+      if ( this.advancedRealtimePreview_Timer ) this.advancedRealtimePreview_Timer.stop();
+      this.clearLargePreviewCache();
+      this.invalidateAdvancedPreviewCache();
+      invalidateStarMaskCache();
+
+      // Full soft rebuild: all _APS_ preview sources/tiles are regenerated at the
+      // new quality. User-facing controls are restored below; stale cache/views are
+      // intentionally not reused across preview resolutions.
+      this.createPreviewTiles( false );
+      if ( !this.previewsReady )
       {
          this.hideLargePreviewLoading();
          return;
       }
 
-      var newSource = createPreviewPaletteView( pData, this.selectedPaletteIndex );
-      if ( isValidView( newSource ) )
-      {
-         this.largePreviewSourceView = newSource;
-         for ( var ti = 0; ti < this.previewTiles.length; ++ti )
-            if ( this.previewTiles[ti].paletteIndex == this.selectedPaletteIndex )
-               this.previewTiles[ti].previewView = newSource;
-         this.realtimePreviewLastKey = "";
-         this.largePreviewBaseBitmap = null;
-         this.largePreviewBaseKey = "";
-         this.invalidateAdvancedPreviewCache();
-         this.refreshLargePreviewBoost( false );
-      }
-      else
-         this.hideLargePreviewLoading();
+      data.previewShowAdvanced = saved.showAdvanced;
+      if ( this.previewAdvanced_CheckBox )
+         this.previewAdvanced_CheckBox.checked = saved.showAdvanced;
+      this.refreshAdvancedPreviewVisibility();
 
-      cleanupStudioPreviewSourceWindows();
+      this.selectedPaletteIndex = saved.palette;
+      this.selectedPaletteBoosted = false;
+      data.selectedPreviewPalette = saved.palette;
+      data.selectedPreviewBoosted = false;
+      data.typePalette = saved.palette;
+      data.finalOutputId = saved.finalOutputId;
+      if ( this.finalOutputId_Edit )
+         this.finalOutputId_Edit.text = saved.finalOutputId;
+
+      this.applyBoostedControlsState( saved.boostedControls );
+      if ( this.restoreAdvancedControlsState )
+         this.restoreAdvancedControlsState( saved.advancedControls );
+      data.previewAdvancedLayerStack = cloneAdvancedLayerStack( saved.advancedStack );
+      this.frozenAdvancedSourceView = null;
+      this.frozenAdvancedBaseKey = "";
+      this.frozenAdvancedBoostBaseline = null;
+      this.advancedUndoStack = [];
+      this.advancedRedoStack = [];
+
+      data.previewEnableMaskProtection = !!saved.maskEnabled;
+      data.previewEnableStarProtection = !!saved.maskEnabled;
+      data.previewMaskPreset = saved.maskPreset;
+      data.previewStarProtectionAmount = saved.maskAmount;
+      data.previewShowMaskPreview = saved.showMask;
+      data.previewInvertMask = saved.invertMask;
+      if ( this.refreshMaskControlsState )
+         this.refreshMaskControlsState();
+
+      var restoredSource = null;
+      for ( var ti = 0; ti < this.previewTiles.length; ++ti )
+      {
+         var tile = this.previewTiles[ti];
+         tile.selected = (tile.paletteIndex == saved.palette && !tile.boostedVariant);
+         if ( tile.selected && isValidView( tile.previewView ) )
+            restoredSource = tile.previewView;
+         tile.update();
+      }
+
+      if ( isValidView( restoredSource ) )
+         this.largePreviewSourceView = restoredSource;
+      if ( this.selectedPreview_Label )
+         this.selectedPreview_Label.text = "<b>Selected:</b> " + getPreviewPaletteName( saved.palette, false );
+
+      this.previewZoom = saved.zoom;
+      this.previewPanX = saved.panX;
+      this.previewPanY = saved.panY;
+      this.realtimePreviewLastKey = "";
+      this.largePreviewBaseBitmap = null;
+      this.largePreviewBaseKey = "";
+      this.invalidateAdvancedPreviewCache();
+      this.refreshAdvancedControlsState();
+      this.refreshLargePreviewBoost( true );
+      this.showPreviewToast( "Preview quality changed to " + getPreviewQualityLabel() );
    };
 
    this.randomRange = function( minValue, maxValue )
