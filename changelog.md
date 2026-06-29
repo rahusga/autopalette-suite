@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.8] - 2026-06-29
+
+This release expands the Advanced workflow with a new Channel Lightness tool and several UI refinements based on tester feedback.
+
+### Added
+- Added **Channel Lightness** as a new Apply-only Advanced layer.
+- Channel Lightness can use **Ha**, **SII** or **OIII** as the lightness source.
+- Added a compact `gears` icon to the **Create Previews** button.
+
+### Changed
+- Advanced Controls are now ordered as **Channel Lightness**, **Gold Accent**, then **Structure Lift**.
+- Advanced source selectors now use the order **Ha / SII / OIII**, with **Ha** as the default source.
+- Channel Lightness response has been strengthened after tester validation.
+- Generate Final Image has been restored to a standard button layout.
+- Advanced Apply now more strictly follows the intended processing order: base palette, mask protection, Boosted controls, then Advanced layers.
+
+### Fixed
+- Improved consistency when applying Advanced layers after changing Boosted controls.
+- Preserved the Apply-only behavior for computationally expensive Advanced operations.
+
+
 ## [1.0.7] - 2026-06-21
 
 ### Changed
@@ -48,5 +69,3 @@
 - Improved handling of linear and non-linear images.
 - Improved cleanup of intermediate views.
 - Reduced preview mismatch in final generated images.
-
-

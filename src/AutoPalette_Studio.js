@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.7 (Jun 2026)
+ * AutoPalette Studio version 1.0.8 (Jun 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -21,9 +21,11 @@
  * 1.0.4.1 - UI: Advanced combination preview rows use the same aligned grid layout.
  * 1.0.5 - Perf/UI: cache mask preview bitmaps and align large preview width to the thumbnail grid.
  * 1.0.6 - UI: add documentation button and Suite Astrocitas SVG feature icon.
- * 1.0.7 - UX/Bugfix: Balanced preview by default, safer preview-quality
- *       rebuilds, improved Advanced Undo/Redo state, and clearer manual
- *       Apply-only behaviour for Advanced controls.
+ * 1.0.7 - Tester build: Balanced preview by default, safer preview-quality
+ *       rebuilds, improved Advanced Undo/Redo state, Apply-only Advanced
+ *       controls and improved linear preview/final consistency.
+ * 1.0.8 - Advanced: add Channel Lightness apply layer with Ha/SII/OIII source selector,
+ *       Ha default source, stronger response, apply-only workflow and compact source dropdowns.
  *
  *****************************************************************************/
 
@@ -46,7 +48,7 @@
 
 #feature-id AutoPaletteStudio : Suite Astrocitas > AutoPalette Studio
 #feature-icon icons/AutoPaletteStudio.svg
-#feature-info AutoPalette Studio v1.0.7<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-info AutoPalette Studio v1.0.8<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -61,7 +63,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.7"
+#define VERSION "1.0.8"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -1314,8 +1316,10 @@ function paletteStart(data, progressDialog){
 
    apsUpdateFinalProgress( progressDialog, 30, "Preparing working views..." );
    var apsStageStart = apsNowMs();
-   data.linearInputAutoStretchEnabled = prepareFinalLinearInputWorkingViews( data );
+   var previewLinearInputWorkflow = (data.previewAutoStretch === true || data.linearInputAutoStretchEnabled === true);
+   var finalLinearInputDetected = prepareFinalLinearInputWorkingViews( data, previewLinearInputWorkflow );
    apsProfileLog( "final linear input working views", apsStageStart );
+   data.linearInputAutoStretchEnabled = previewLinearInputWorkflow || finalLinearInputDetected;
    data.previewAutoStretch = data.linearInputAutoStretchEnabled;
 
    if ( data.typePalette != PALETTE_ORIGINAL && !isValidView(data.referenceSII))
@@ -1961,7 +1965,7 @@ function NBChannelExtraction(vista, haId, siiId, oiiiId){
       [true, oiiiId]
    ];
    P.sampleFormat = ChannelExtraction.prototype.SameAsSource;
-   P.inheritAstrometricSolution = true;
+   P.inheritAstrometricSolution = false;
 
    P.executeOn(m, false /*swapFile */);
    m.endProcess();
@@ -2414,10 +2418,6 @@ function makeViewCopy( sourceView, newId )
    win.mainView.image.apply( img );
    win.mainView.endProcess();
 
-   // RC5.3: preserve astrometric metadata on internal full-size copies when available.
-   // This is especially useful for final linear working copies used before output generation.
-   copyAstrometricSolutionSafe( sourceView, win.mainView, "temporary copy" );
-
    return win.mainView;
 }
 
@@ -2604,12 +2604,14 @@ function isLikelyLinearPaletteView( view )
    return (s.median < 0.12 && s.p98 < 0.55);
 }
 
-function applyLinearInputStretchToView( view, reason )
+function applyLinearInputStretchToView( view, reason, force )
 {
    if ( !isValidView( view ) )
       return false;
 
-   if ( !isLikelyLinearPaletteView( view ) )
+   force = !!force;
+
+   if ( !force && !isLikelyLinearPaletteView( view ) )
       return false;
 
    var apsLinearStretchTotalStart = apsNowMs();
@@ -2861,12 +2863,14 @@ function cleanupFinalLinearWorkingViews()
    safeForceCloseWindowById( PREVIEW_PREFIX + "SII_LF" );
 }
 
-function makeLinearFinalWorkingCopyIfNeeded( view, outId, reason )
+function makeLinearFinalWorkingCopyIfNeeded( view, outId, reason, force )
 {
    if ( !isValidView( view ) )
       return view;
 
-   if ( !isLikelyLinearPaletteView( view ) )
+   force = !!force;
+
+   if ( !force && !isLikelyLinearPaletteView( view ) )
       return view;
 
    safeForceCloseWindowById( outId );
@@ -2874,35 +2878,44 @@ function makeLinearFinalWorkingCopyIfNeeded( view, outId, reason )
    if ( !isValidView( copy ) )
       return view;
 
-   applyLinearInputStretchToView( copy, reason );
+   applyLinearInputStretchToView( copy, reason, force );
    if ( isValidWindow( copy.window ) )
       copy.window.hide();
    return copy;
 }
 
-function prepareFinalLinearInputWorkingViews( data )
+function prepareFinalLinearInputWorkingViews( data, forceLinearInput )
 {
    cleanupFinalLinearWorkingViews();
+
+   /* v1.0.7: Final generation follows the linear/non-linear decision already
+    * made by the preview pipeline. Full-resolution masters can have bright
+    * stars or high p98 values that make the heuristic reject them even though
+    * the reduced preview sources were correctly detected as linear. When the
+    * approved preview used the linear display workflow, force the same
+    * temporary working-copy stretch for the final sources.
+    */
+   forceLinearInput = !!forceLinearInput;
 
    var changed = false;
    var v;
    var originalSource = data.currentView;
    data.finalOriginalView = null;
 
-   v = makeLinearFinalWorkingCopyIfNeeded( originalSource, PREVIEW_PREFIX + "FINAL_RGB_LINEAR", "final RGB/Original" );
+   v = makeLinearFinalWorkingCopyIfNeeded( originalSource, PREVIEW_PREFIX + "FINAL_RGB_LINEAR", "final RGB/Original", forceLinearInput );
    if ( isValidView( v ) )
    {
       data.finalOriginalView = v;
       if ( v !== originalSource ) changed = true;
    }
 
-   v = makeLinearFinalWorkingCopyIfNeeded( data.referenceHA, PREVIEW_PREFIX + "FINAL_HA_LINEAR", "final Ha" );
+   v = makeLinearFinalWorkingCopyIfNeeded( data.referenceHA, PREVIEW_PREFIX + "FINAL_HA_LINEAR", "final Ha", forceLinearInput );
    if ( isValidView( v ) && v !== data.referenceHA ) { data.referenceHA = v; changed = true; }
 
-   v = makeLinearFinalWorkingCopyIfNeeded( data.referenceOIII, PREVIEW_PREFIX + "FINAL_OIII_LINEAR", "final OIII" );
+   v = makeLinearFinalWorkingCopyIfNeeded( data.referenceOIII, PREVIEW_PREFIX + "FINAL_OIII_LINEAR", "final OIII", forceLinearInput );
    if ( isValidView( v ) && v !== data.referenceOIII ) { data.referenceOIII = v; changed = true; }
 
-   v = makeLinearFinalWorkingCopyIfNeeded( data.referenceSII, PREVIEW_PREFIX + "FINAL_SII_LINEAR", "final SII" );
+   v = makeLinearFinalWorkingCopyIfNeeded( data.referenceSII, PREVIEW_PREFIX + "FINAL_SII_LINEAR", "final SII", forceLinearInput );
    if ( isValidView( v ) && v !== data.referenceSII ) { data.referenceSII = v; changed = true; }
 
    if ( changed )
@@ -4908,7 +4921,18 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
    else
       gActiveStarMaskViewId = "";
 
-   if ( data.previewShowLastPreview || !hasPreviewRefinementsToApply() )
+   var goldEnabled = !skipAdvancedStack && data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6;
+   var lightnessEnabled = !skipAdvancedStack && isLightnessActive();
+   var channelLightnessEnabled = !skipAdvancedStack && isChannelLightnessActive();
+   var advancedStackEnabled = !skipAdvancedStack && data.previewAdvancedLayerStack != null && data.previewAdvancedLayerStack.length > 0;
+   // Advanced controls are Apply-only. The current checkbox/slider values
+   // must be rendered only while Calculate & Apply is committing the pending
+   // layer. Without this guard, a neutral Boosted state can take the direct
+   // preview route and ignore the pending Advanced layer entirely.
+   var pendingAdvancedEnabled = (goldEnabled || lightnessEnabled || channelLightnessEnabled) &&
+                                data.previewForcePendingAdvancedLayer === true;
+
+   if ( data.previewShowLastPreview || (!hasPreviewRefinementsToApply() && !pendingAdvancedEnabled) )
    {
       apsProfileNote( "large preview route", "direct/original" );
       var apsDirectBmp = renderAutoStretchedDisplayBitmap( view, view, PREVIEW_PREFIX + "LARGE_DISPLAY_DIRECT" );
@@ -4942,15 +4966,6 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
    tmpData.currentView = view;
    tmpData.referenceHA = view;
    tmpData.previewSilent = true;
-
-   var goldEnabled = !skipAdvancedStack && data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6;
-   var channelLightnessEnabled = !skipAdvancedStack && isChannelLightnessActive();
-   var advancedStackEnabled = !skipAdvancedStack && data.previewAdvancedLayerStack != null && data.previewAdvancedLayerStack.length > 0;
-   // Advanced controls are Apply-only. Current checkbox/slider values are
-   // not part of normal realtime Boosted refreshes; they are rendered only
-   // while Apply is committing the pending layer.
-   var pendingAdvancedEnabled = (goldEnabled || channelLightnessEnabled) &&
-                                data.previewForcePendingAdvancedLayer === true;
 
    try
    {
@@ -5082,10 +5097,12 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
                   applyAdvancedLayerStackToView( colorView );
                if ( pendingAdvancedEnabled )
                {
-                  if ( goldEnabled )
-                     applyGoldAccentOnlyToView( colorView );
+                  if ( lightnessEnabled )
+                     applyLightnessOnlyToView( colorView );
                   if ( channelLightnessEnabled )
                      applyChannelLightnessOnlyToView( colorView );
+                  if ( goldEnabled )
+                     applyGoldAccentOnlyToView( colorView );
                }
                if ( data.previewAutoStretch )
                   applyDisplayAutoStretchToView( colorView, shouldUseLinkedSHODisplayStretch(), "large refined display" );
@@ -5198,9 +5215,18 @@ function isChannelLightnessActive()
           Math.abs((data.previewChannelLightnessAmount || 0.0)) > 1e-6;
 }
 
+function isLightnessActive()
+{
+   var src = data.previewLightnessSource || 0;
+   return data.previewEnableLightness &&
+          (src == 0 || src == 1 || src == 2) &&
+          Math.abs((data.previewLightnessAmount || 0.0)) > 1e-6;
+}
+
 function isAnyAdvancedPreviewActive()
 {
    return (data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6) ||
+          isLightnessActive() ||
           isChannelLightnessActive();
 }
 
@@ -5341,6 +5367,68 @@ function applyChannelLightnessOnlyToView( view )
    P.executeOn( view, false );
    view.endProcess();
    apsProfileLog( "Structure Lift PixelMath", apsStructureLiftStart );
+}
+
+function getLightnessSourceView( targetView )
+{
+   var src = data.previewLightnessSource || 0;
+   if ( src != 0 && src != 1 && src != 2 )
+      return null;
+
+   function sameGeometry( v )
+   {
+      return isValidView( v ) && isValidView( targetView ) &&
+             v.image.width == targetView.image.width &&
+             v.image.height == targetView.image.height;
+   }
+
+   var candidates;
+   if ( src == 2 )
+      candidates = [ View.viewById( PREVIEW_PREFIX + "HA" ), data.referenceHA, View.viewById( HA_NAME ), View.viewById( HA_NAME + "_LF" ) ];
+   else if ( src == 1 )
+      candidates = [ View.viewById( PREVIEW_PREFIX + "OIII" ), data.referenceOIII, View.viewById( O3_NAME ), View.viewById( O3_NAME + "_LF" ) ];
+   else
+      candidates = [ View.viewById( PREVIEW_PREFIX + "SII" ), data.referenceSII, View.viewById( S2_NAME ), View.viewById( S2_NAME + "_LF" ) ];
+
+   for ( var i = 0; i < candidates.length; ++i )
+      if ( sameGeometry( candidates[i] ) )
+         return candidates[i];
+   return null;
+}
+
+function applyLightnessOnlyToView( view )
+{
+   if ( !isValidView( view ) || view.image.numberOfChannels != 3 )
+      return;
+
+   if ( !isLightnessActive() )
+      return;
+
+   function clipExpr( e )
+   {
+      return "min(1,max(0,(" + e + ")))";
+   }
+
+   var sourceView = getLightnessSourceView( view );
+   var srcMode = data.previewLightnessSource || 0;
+   // i02: make Channel Lightness another 50% stronger; total response is now 2.0x the original 1.0.8 behavior while keeping the public 0..1 slider range.
+   var a = formatFloat( Math.min( 2.0, 2.0*(data.previewLightnessAmount || 0.0) ), 3 );
+   var R = "$T[0]";
+   var G = "$T[1]";
+   var B = "$T[2]";
+   var Y = "max(1e-06,(0.2126*(" + R + ")+0.7152*(" + G + ")+0.0722*(" + B + ")))";
+   var proxy = (srcMode == 2) ? G : ((srcMode == 1) ? "max((" + G + "),(" + B + "))" : R);
+   var S = clipExpr( isValidView( sourceView ) ? sourceView.id : proxy );
+   var Lmix = "((1-(" + a + "))*(" + Y + ")+(" + a + ")*(" + S + "))";
+   var gain = "min(4,max(0,(" + Lmix + ")/(" + Y + ")))";
+
+   var exprs = [
+      clipExpr( "(" + R + ")*(" + gain + ")" ),
+      clipExpr( "(" + G + ")*(" + gain + ")" ),
+      clipExpr( "(" + B + ")*(" + gain + ")" )
+   ];
+
+   applyRGBPixelMathInPlace( view, exprs, "Channel Lightness PixelMath" );
 }
 
 function buildGoldAccentMaskExpression()
@@ -5517,7 +5605,10 @@ function cloneAdvancedLayerStack( stack )
          goldAmount: l.goldAmount || 0.0,
          channelEnabled: !!l.channelEnabled,
          channelSource: l.channelSource || 0,
-         channelAmount: l.channelAmount || 0.0
+         channelAmount: l.channelAmount || 0.0,
+         lightnessEnabled: !!l.lightnessEnabled,
+         lightnessSource: l.lightnessSource || 0,
+         lightnessAmount: l.lightnessAmount || 0.0
       } );
    }
    return out;
@@ -5656,6 +5747,9 @@ function captureCurrentAdvancedLayer()
    return {
       goldEnabled: !!data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6,
       goldAmount: data.previewSIIHighlightAccent || 0.0,
+      lightnessEnabled: !!data.previewEnableLightness && Math.abs((data.previewLightnessAmount || 0.0)) > 1e-6,
+      lightnessSource: data.previewLightnessSource || 0,
+      lightnessAmount: data.previewLightnessAmount || 0.0,
       channelEnabled: !!data.previewEnableChannelLightness && Math.abs((data.previewChannelLightnessAmount || 0.0)) > 1e-6,
       channelSource: data.previewChannelLightnessSource || 0,
       channelAmount: data.previewChannelLightnessAmount || 0.0
@@ -5669,6 +5763,9 @@ function applyAdvancedLayerToView( view, layer )
 
    var oldGoldEnabled = data.previewEnableSIIAccent;
    var oldGoldAmount = data.previewSIIHighlightAccent;
+   var oldLightnessEnabled = data.previewEnableLightness;
+   var oldLightnessSource = data.previewLightnessSource;
+   var oldLightnessAmount = data.previewLightnessAmount;
    var oldChannelEnabled = data.previewEnableChannelLightness;
    var oldChannelSource = data.previewChannelLightnessSource;
    var oldChannelAmount = data.previewChannelLightnessAmount;
@@ -5677,19 +5774,27 @@ function applyAdvancedLayerToView( view, layer )
    {
       data.previewEnableSIIAccent = !!layer.goldEnabled;
       data.previewSIIHighlightAccent = layer.goldAmount || 0.0;
+      data.previewEnableLightness = !!layer.lightnessEnabled;
+      data.previewLightnessSource = layer.lightnessSource || 0;
+      data.previewLightnessAmount = layer.lightnessAmount || 0.0;
       data.previewEnableChannelLightness = !!layer.channelEnabled;
       data.previewChannelLightnessSource = layer.channelSource || 0;
       data.previewChannelLightnessAmount = layer.channelAmount || 0.0;
 
-      if ( data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6 )
-         applyGoldAccentOnlyToView( view );
+      if ( isLightnessActive() )
+         applyLightnessOnlyToView( view );
       if ( isChannelLightnessActive() )
          applyChannelLightnessOnlyToView( view );
+      if ( data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6 )
+         applyGoldAccentOnlyToView( view );
    }
    finally
    {
       data.previewEnableSIIAccent = oldGoldEnabled;
       data.previewSIIHighlightAccent = oldGoldAmount;
+      data.previewEnableLightness = oldLightnessEnabled;
+      data.previewLightnessSource = oldLightnessSource;
+      data.previewLightnessAmount = oldLightnessAmount;
       data.previewEnableChannelLightness = oldChannelEnabled;
       data.previewChannelLightnessSource = oldChannelSource;
       data.previewChannelLightnessAmount = oldChannelAmount;
@@ -6373,8 +6478,11 @@ function parametersPrototype()
       this.previewSIIHighlightAccent = 0.00;
       this.previewSIIAccentActive = false;
       this.previewEnableChannelLightness = false;
-      this.previewChannelLightnessSource = 0; // 0=SII, 1=OIII, 2=Ha. All three are implemented.
+      this.previewChannelLightnessSource = 2; // 0=SII, 1=OIII, 2=Ha. All three are implemented. Default UI source: Ha.
       this.previewChannelLightnessAmount = 0.00;
+      this.previewEnableLightness = false;
+      this.previewLightnessSource = 2; // 0=SII, 1=OIII, 2=Ha. Default UI source: Ha.
+      this.previewLightnessAmount = 0.00;
       this.previewEnableStarProtection = false; // legacy alias
       this.previewEnableMaskProtection = false;
       this.previewMaskPreset = 0; // 0=Star protection, 1=Blue Core, 2=Warm/Gold, 3=Faint Red
@@ -6433,6 +6541,9 @@ function parametersPrototype()
       Parameters.set( "previewEnableChannelLightness", this.previewEnableChannelLightness );
       Parameters.set( "previewChannelLightnessSource", this.previewChannelLightnessSource );
       Parameters.set( "previewChannelLightnessAmount", this.previewChannelLightnessAmount );
+      Parameters.set( "previewEnableLightness", this.previewEnableLightness );
+      Parameters.set( "previewLightnessSource", this.previewLightnessSource );
+      Parameters.set( "previewLightnessAmount", this.previewLightnessAmount );
       Parameters.set( "previewEnableStarProtection", this.previewEnableStarProtection );
       Parameters.set( "previewEnableMaskProtection", this.previewEnableMaskProtection );
       Parameters.set( "previewMaskPreset", this.previewMaskPreset );
@@ -6566,6 +6677,15 @@ function parametersPrototype()
 
       if ( Parameters.has( "previewChannelLightnessAmount" ) )
          this.previewChannelLightnessAmount = Parameters.getReal( "previewChannelLightnessAmount" );
+
+      if ( Parameters.has( "previewEnableLightness" ) )
+         this.previewEnableLightness = Parameters.getBoolean( "previewEnableLightness" );
+
+      if ( Parameters.has( "previewLightnessSource" ) )
+         this.previewLightnessSource = Parameters.getInteger( "previewLightnessSource" );
+
+      if ( Parameters.has( "previewLightnessAmount" ) )
+         this.previewLightnessAmount = Parameters.getReal( "previewLightnessAmount" );
 
       if ( Parameters.has( "previewEnableStarProtection" ) )
          this.previewEnableStarProtection = Parameters.getBoolean( "previewEnableStarProtection" );
@@ -7710,12 +7830,17 @@ data.selectedPreviewBoosted = false;
          showMask: data.previewShowMaskPreview,
          invertMask: data.previewInvertMask,
 
-         // Keep Advanced stack/control state in the normal realtime cache
-         // key so explicit Advanced Apply and subsequent Boosted refreshes
-         // cannot collide with stale Boosted-only cached bitmaps.
+         // i02: The large preview renderer includes committed and pending
+         // Advanced layers in the same visual chain as Boosted. Keep that
+         // state in the normal realtime cache key as well, otherwise a
+         // delayed/base realtime refresh can reuse an older Boosted-only
+         // bitmap and overwrite the Advanced preview a few seconds later.
          advancedStackDepth: ((data.previewAdvancedLayerStack != null) ? data.previewAdvancedLayerStack.length : 0),
          advancedGoldEnabled: data.previewEnableSIIAccent,
          advancedGoldAmount: data.previewSIIHighlightAccent,
+         advancedLightnessEnabled: data.previewEnableLightness,
+         advancedLightnessSource: data.previewLightnessSource,
+         advancedLightnessAmount: data.previewLightnessAmount,
          advancedStructureEnabled: data.previewEnableChannelLightness,
          advancedStructureSource: data.previewChannelLightnessSource,
          advancedStructureAmount: data.previewChannelLightnessAmount
@@ -7726,7 +7851,7 @@ data.selectedPreviewBoosted = false;
    {
       // Kept as a semantic alias for Advanced-specific timers/apply logic.
       // realtimePreviewParameterKey() already includes the Advanced state in
-      // so base/advanced cache entries cannot collide.
+      // i02 so base/advanced cache entries cannot collide.
       return this.realtimePreviewParameterKey();
    };
 
@@ -7820,9 +7945,9 @@ data.selectedPreviewBoosted = false;
       finally
       {
          data.previewSIIAccentActive = oldActive;
-         // An Advanced render is authoritative for the current visible state.
-         // Drop any stale base/Boosted realtime refresh queued while the
-         // Advanced PixelMath pass was running; otherwise it can overwrite
+         // i02: an Advanced render is authoritative for the current visible
+         // state. Drop any stale base/Boosted realtime refresh queued while
+         // the Advanced PixelMath pass was running; otherwise it can overwrite
          // the correct Structure Lift/Gold Accent preview shortly afterwards.
          this.realtimeRefreshQueued = false;
          this.realtimeRefreshQueuedForce = false;
@@ -8345,7 +8470,7 @@ data.selectedPreviewBoosted = false;
    this.enableSIIAccent_CheckBox = new CheckBox( this );
    this.enableSIIAccent_CheckBox.text = "Enable Gold Accent";
    this.enableSIIAccent_CheckBox.checked = data.previewEnableSIIAccent;
-   this.enableSIIAccent_CheckBox.toolTip = "<p><b>Enable Gold Accent</b></p>Selects Gold Accent as a pending Advanced layer. Press Apply to commit it to the Advanced stack; uncheck it to exclude it from the next Apply.";
+   this.enableSIIAccent_CheckBox.toolTip = "<p><b>Enable Gold Accent</b></p>Selects Gold Accent as a pending Advanced layer. Press Calculate & Apply to commit it to the Advanced stack; uncheck it to exclude it from the next Apply.";
 
    this.previewSIIHighlightAccent_Control = new NumericControl( this );
    this.previewSIIHighlightAccent_Control.label.text = "Gold Accent:";
@@ -8369,17 +8494,90 @@ data.selectedPreviewBoosted = false;
          dlg.invalidateAdvancedPreviewCache();
          dlg.refreshAdvancedControlsState();
       };
-   this.previewSIIHighlightAccent_Control.toolTip = "<p>Selective gold/yellow accent using a ColorMask + RGB/H curves style transformation. For performance, changing this slider does not refresh the preview until you press Apply. This version applies a stronger internal Gold Accent response (+50%) while keeping the same slider range.</p>";
+   this.previewSIIHighlightAccent_Control.toolTip = "<p>Selective gold/yellow accent using a ColorMask + RGB/H curves style transformation. For performance, changing this slider does not refresh the preview until you press Calculate & Apply. This version applies a stronger internal Gold Accent response (+50%) while keeping the same slider range.</p>";
+
+   var narrowAdvancedSourceWidth = this.font.width( "OIII" ) + 46;
+
+   // i03: UI order is Ha / SII / OIII. Internal enum remains
+   // 0=SII, 1=OIII, 2=Ha for compatibility with saved states/stacks.
+   this.advancedSourceEnumToComboIndex = function( src )
+   {
+      if ( src == 2 ) return 0; // Ha
+      if ( src == 0 ) return 1; // SII
+      if ( src == 1 ) return 2; // OIII
+      return 1;
+   };
+
+   this.advancedSourceComboIndexToEnum = function( idx )
+   {
+      if ( idx == 0 ) return 2; // Ha
+      if ( idx == 1 ) return 0; // SII
+      if ( idx == 2 ) return 1; // OIII
+      return 0;
+   };
+
+   this.enableLightness_CheckBox = new CheckBox( this );
+   this.enableLightness_CheckBox.text = "Enable Channel Lightness";
+   this.enableLightness_CheckBox.checked = data.previewEnableLightness;
+   this.enableLightness_CheckBox.toolTip = "<p><b>Enable Channel Lightness</b></p>Selects Channel Lightness as a pending Advanced layer. Press Calculate &amp; Apply to commit it to the Advanced stack; uncheck it to exclude it from the next Apply.</p>";
+
+   this.lightnessSource_Label = new Label( this );
+   this.lightnessSource_Label.text = "Source:";
+   this.lightnessSource_Label.textAlignment = TextAlign_Right|TextAlign_VertCenter;
+   this.lightnessSource_Label.minWidth = labelWidth;
+
+   this.lightnessSource_Combo = new ComboBox( this );
+   this.lightnessSource_Combo.editEnabled = false;
+   this.lightnessSource_Combo.addItem( "Ha" );
+   this.lightnessSource_Combo.addItem( "SII" );
+   this.lightnessSource_Combo.addItem( "OIII" );
+   this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewLightnessSource || 0 );
+   this.lightnessSource_Combo.setFixedWidth( narrowAdvancedSourceWidth );
+   this.lightnessSource_Combo.toolTip = "<p>Channel Lightness source. Uses the selected narrowband channel as luminance guidance for the current RGB palette.</p>";
+   this.lightnessSource_Combo.onItemSelected = function()
+   {
+      data.previewLightnessSource = dlg.advancedSourceComboIndexToEnum( this.currentItem );
+      dlg.invalidateAdvancedPreviewCache();
+      dlg.refreshAdvancedControlsState();
+   };
+
+   this.lightnessSource_Sizer = new HorizontalSizer;
+   this.lightnessSource_Sizer.spacing = 4;
+   this.lightnessSource_Sizer.add( this.lightnessSource_Label );
+   this.lightnessSource_Sizer.add( this.lightnessSource_Combo );
+   this.lightnessSource_Sizer.addStretch();
+
+   this.previewLightnessAmount_Control = new NumericControl( this );
+   this.previewLightnessAmount_Control.label.text = "Lightness amount:";
+   this.previewLightnessAmount_Control.label.minWidth = labelWidth;
+   this.previewLightnessAmount_Control.setRange( 0.00, 1.00 );
+   this.previewLightnessAmount_Control.setPrecision( 3 );
+   this.previewLightnessAmount_Control.slider.setRange( 0, 10000 );
+   this.previewLightnessAmount_Control.setValue( data.previewLightnessAmount );
+   this.previewLightnessAmount_Control.toolTip = "<p><b>Lightness amount</b></p>Controls how strongly the selected source channel guides the image lightness. Internal response is boosted by 100% versus the original 1.0.8 implementation in this tester iteration. For performance, changing this slider does not refresh the preview until you press <b>Calculate &amp; Apply</b>.</p>";
+   this.previewLightnessAmount_Control.onValueUpdated = function( value )
+   {
+      data.previewLightnessAmount = value;
+      dlg.invalidateAdvancedPreviewCache();
+      dlg.refreshAdvancedControlsState();
+   };
+   if ( this.previewLightnessAmount_Control.edit )
+      this.previewLightnessAmount_Control.edit.onEditCompleted = function()
+      {
+         data.previewLightnessAmount = dlg.previewLightnessAmount_Control.value;
+         dlg.invalidateAdvancedPreviewCache();
+         dlg.refreshAdvancedControlsState();
+      };
 
    this.channelLightnessTitle_Label = new Label( this );
    this.channelLightnessTitle_Label.useRichText = true;
    this.channelLightnessTitle_Label.text = "";
-   this.channelLightnessTitle_Label.toolTip = "<p>Use a narrowband channel as a selective structure guide. SII and Ha are implemented; OIII is prepared for a future version.</p>";
+   this.channelLightnessTitle_Label.toolTip = "<p>Use a narrowband channel as a selective structure guide. SII, OIII and Ha are implemented.</p>";
 
    this.enableChannelLightness_CheckBox = new CheckBox( this );
    this.enableChannelLightness_CheckBox.text = "Enable Structure Lift";
    this.enableChannelLightness_CheckBox.checked = data.previewEnableChannelLightness;
-   this.enableChannelLightness_CheckBox.toolTip = "<p><b>Enable Structure Lift</b></p>Selects Structure Lift as a pending Advanced layer. Press Apply to commit it to the Advanced stack; uncheck it to exclude it from the next Apply. SII, OIII and Ha are implemented.</p>";
+   this.enableChannelLightness_CheckBox.toolTip = "<p><b>Enable Structure Lift</b></p>Selects Structure Lift as a pending Advanced layer. Press Calculate & Apply to commit it to the Advanced stack; uncheck it to exclude it from the next Apply. SII, OIII and Ha are implemented.</p>";
 
    this.channelLightnessSource_Label = new Label( this );
    this.channelLightnessSource_Label.text = "Source:";
@@ -8388,14 +8586,15 @@ data.selectedPreviewBoosted = false;
 
    this.channelLightnessSource_Combo = new ComboBox( this );
    this.channelLightnessSource_Combo.editEnabled = false;
+   this.channelLightnessSource_Combo.addItem( "Ha" );
    this.channelLightnessSource_Combo.addItem( "SII" );
    this.channelLightnessSource_Combo.addItem( "OIII" );
-   this.channelLightnessSource_Combo.addItem( "Ha" );
-   this.channelLightnessSource_Combo.currentItem = data.previewChannelLightnessSource || 0;
+   this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewChannelLightnessSource || 0 );
+   this.channelLightnessSource_Combo.setFixedWidth( narrowAdvancedSourceWidth );
    this.channelLightnessSource_Combo.toolTip = "<p>Structure source. SII, OIII and Ha are functional. OIII uses a blue-core selective structure lift.</p>";
    this.channelLightnessSource_Combo.onItemSelected = function()
    {
-      data.previewChannelLightnessSource = this.currentItem;
+      data.previewChannelLightnessSource = dlg.advancedSourceComboIndexToEnum( this.currentItem );
       dlg.invalidateAdvancedPreviewCache();
       dlg.refreshAdvancedControlsState();
       // Source changes define the next Advanced layer; they should not discard
@@ -8405,7 +8604,8 @@ data.selectedPreviewBoosted = false;
    this.channelLightnessSource_Sizer = new HorizontalSizer;
    this.channelLightnessSource_Sizer.spacing = 4;
    this.channelLightnessSource_Sizer.add( this.channelLightnessSource_Label );
-   this.channelLightnessSource_Sizer.add( this.channelLightnessSource_Combo, 1 );
+   this.channelLightnessSource_Sizer.add( this.channelLightnessSource_Combo );
+   this.channelLightnessSource_Sizer.addStretch();
 
    this.previewChannelLightnessAmount_Control = new NumericControl( this );
    this.previewChannelLightnessAmount_Control.label.text = "Structure amount:";
@@ -8414,14 +8614,14 @@ data.selectedPreviewBoosted = false;
    this.previewChannelLightnessAmount_Control.setPrecision( 3 );
    this.previewChannelLightnessAmount_Control.slider.setRange( 0, 10000 );
    this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
-   this.previewChannelLightnessAmount_Control.toolTip = "<p><b>Structure amount</b></p>Controls the selective structure lift guided by the chosen source. SII, OIII and Ha are implemented. OIII is tuned to emphasize blue/cyan inner structure. For performance, changing this slider does not refresh the preview until you press <b>Apply</b>.</p>";
+   this.previewChannelLightnessAmount_Control.toolTip = "<p><b>Structure amount</b></p>Controls the selective structure lift guided by the chosen source. SII, OIII and Ha are implemented. OIII is tuned to emphasize blue/cyan inner structure. For performance, changing this slider does not refresh the preview until you press <b>Calculate &amp; Apply</b>.</p>";
    this.previewChannelLightnessAmount_Control.onValueUpdated = function( value )
    {
       data.previewChannelLightnessAmount = value;
       dlg.invalidateAdvancedPreviewCache();
-      // Structure Lift is manual Apply-only. Moving the slider only marks the
-      // Advanced cache dirty and keeps Boosted controls responsive. The effect
-      // is refreshed when Apply is pressed.
+      // i03: Structure Lift is intentionally manual-apply again. Moving the
+      // slider should only mark the Advanced cache dirty and keep Boosted
+      // controls responsive. The effect is refreshed when Apply is pressed.
       dlg.refreshAdvancedControlsState();
    };
    if ( this.previewChannelLightnessAmount_Control.edit )
@@ -8446,9 +8646,9 @@ data.selectedPreviewBoosted = false;
       if ( key == "" )
          key = this.advancedPreviewParameterKey();
 
-      // Apply Advanced is a commit operation. Even if the same visual state is
-      // already cached, pressing Apply must still push it onto the Advanced
-      // layer stack.
+      // Apply Advanced is a commit operation. Even if the same visual state has
+      // already been rendered by the realtime Advanced preview cache, pressing
+      // Apply must still push it onto the Advanced layer stack.
       this.pushAdvancedUndoState();
       var currentLayer = captureCurrentAdvancedLayer();
       data.previewSIIAccentActive = true;
@@ -8464,12 +8664,19 @@ data.selectedPreviewBoosted = false;
             // without replacing the first result.
             var savedOverrideValues = data.previewRefinementOverrideValues || null;
             data.previewRefinementOverrideValues = this.currentFineTuneValuesFromFrozenBaseline();
+            gLastLargePreviewRefinedViewId = "";
             createLargePreviewPanelBitmap( this.frozenAdvancedSourceView, true );
             data.previewRefinementOverrideValues = savedOverrideValues;
 
             var stackInput = View.viewById( gLastLargePreviewRefinedViewId );
             if ( !isValidView( stackInput ) )
-               stackInput = this.frozenAdvancedSourceView;
+            {
+               stackInput = this.cloneHiddenRGBView( this.frozenAdvancedSourceView, PREVIEW_PREFIX + "FROZEN_ADVANCED_BOOSTED_BASE" );
+               if ( isValidView( stackInput ) )
+                  applyBoostedOnlyRefinementsToView( stackInput );
+               else
+                  stackInput = this.frozenAdvancedSourceView;
+            }
 
             var stackView = this.cloneHiddenRGBView( stackInput, PREVIEW_PREFIX + "FROZEN_ADVANCED_NEXT" );
             if ( isValidView( stackView ) )
@@ -8553,23 +8760,15 @@ data.selectedPreviewBoosted = false;
    };
 
    this.advancedRealtimePreview_Timer = new Timer();
-   // Advanced effects are intentionally not launched from slider edits. Keep
-   // this timer available for compatibility with legacy/preset paths only.
-   this.advancedRealtimePreview_Timer.interval = APS_REALTIME_PREVIEW_DEBOUNCE_SECONDS;
+   this.advancedRealtimePreview_Timer.interval = 0.10;
    this.advancedRealtimePreview_Timer.periodic = false;
    this.advancedRealtimePreview_Timer.dialog = this;
    this.advancedRealtimePreview_Timer.onTimeout = function()
    {
+      // Advanced Controls are strictly Apply-only. This timer is retained only
+      // to safely stop stale timers from older/internal builds; it must never
+      // render an Advanced preview from slider movement.
       this.stop();
-      try
-      {
-         if ( this.dialog && this.dialog.refreshTransientAdvancedPreview )
-            this.dialog.refreshTransientAdvancedPreview();
-      }
-      catch ( e )
-      {
-         Console.warningln( "Advanced realtime preview refresh aborted: ", e );
-      }
    };
 
    this.applyAdvancedPreviewNow = function( showOverlay )
@@ -8595,6 +8794,16 @@ data.selectedPreviewBoosted = false;
       if ( this.lastPreview_CheckBox )
          this.lastPreview_CheckBox.checked = false;
 
+      // i04: Advanced must always be committed over the current visible Boosted
+      // state. Invalidate large-preview caches before Apply so the sequence is:
+      // Base palette -> Masks -> Boosted/current fine tuning -> Advanced layer.
+      try
+      {
+         if ( this.clearLargePreviewCache )
+            this.clearLargePreviewCache();
+      }
+      catch ( eCache ) {}
+
       var key = this.advancedPreviewParameterKey();
       this.advancedPreviewPendingKey = key;
       if ( this.realtimePreviewTimer )
@@ -8607,12 +8816,14 @@ data.selectedPreviewBoosted = false;
          this.largePreview_Control.update();
       this.advancedPreviewRefreshQueued = true;
       this.applySIIAccent_Timer.stop();
-      this.applySIIAccent_Timer.start();
+      // Calculate immediately from the button. Advanced sliders/checks remain
+      // Apply-only; no Advanced PixelMath runs until this explicit action.
+      this.computeAdvancedPreviewNow();
    };
 
    this.scheduleAdvancedPreviewRefresh = function( forceRefresh )
    {
-      // Advanced is manual Apply-only. Keep this function as a safe
+      // i03: Advanced is manual Apply-only. Keep this function as a safe
       // compatibility hook for preset/legacy paths, but do not launch realtime
       // Advanced rendering from checkbox or slider edits.
       if ( this.realtimeRefreshSuspended )
@@ -8632,9 +8843,9 @@ data.selectedPreviewBoosted = false;
    };
 
    this.applySIIAccent_Button = new ToolButton( this );
-   this.applySIIAccent_Button.text = "Apply";
+   this.applySIIAccent_Button.text = "Calculate && Apply";
    this.applySIIAccent_Button.icon = this.scaledResource( ":/icons/process.png" );
-   this.applySIIAccent_Button.toolTip = "<p><b>Apply</b></p>Applies the enabled Advanced controls as a new layer over the current preview. Repeated clicks can stack OIII, SII, Ha or Gold Accent effects. Boosted controls remain realtime fine-tuning over the stacked result.</p>";
+   this.applySIIAccent_Button.toolTip = "<p><b>Calculate &amp; Apply</b></p>Calculates the enabled Advanced controls and applies them as a new layer over the current preview. Repeated clicks can stack Channel Lightness, Structure Lift or Gold Accent effects. Boosted controls remain realtime fine-tuning over the stacked result.</p>";
    this.applySIIAccent_Button.onClick = function()
    {
       if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
@@ -8675,21 +8886,11 @@ data.selectedPreviewBoosted = false;
    this.advancedWarning_Label.useRichText = true;
    this.advancedWarning_Label.text = "";
    this.advancedWarning_Label.hide();
-   this.advancedWarning_Label.toolTip = "Advanced operations are applied as a compact post-processing stack. Gold Accent uses an optimized mask + PixInsight Convolution pass; Structure Lift currently implements SII, OIII and Ha with source-specific color separation.";
-
-   this.advancedApplyHint_Label = new Label( this );
-   this.advancedApplyHint_Label.backgroundColor = SECTION_BODY_BG;
-   this.advancedApplyHint_Label.textColor = 0xff505050;
-   this.advancedApplyHint_Label.useRichText = true;
-   this.advancedApplyHint_Label.textAlignment = TextAlign_Right|TextAlign_VertCenter;
-   this.advancedApplyHint_Label.text = "Press <b>Apply</b> to preview/apply results";
-   this.advancedApplyHint_Label.toolTip = "Advanced controls are not realtime. Adjust the checkboxes/sliders, then press Apply to calculate and stack the layer over the current preview.";
+   this.advancedWarning_Label.toolTip = "Advanced operations are applied as a compact post-processing stack. Gold Accent uses an optimized mask + PixInsight Convolution pass; Channel Lightness injects source-guided luminance; Structure Lift implements SII, OIII and Ha with source-specific color separation.";
 
    this.applySIIAccent_Sizer = new HorizontalSizer;
    this.applySIIAccent_Sizer.spacing = 6;
    this.applySIIAccent_Sizer.addStretch();
-   this.applySIIAccent_Sizer.add( this.advancedApplyHint_Label );
-   this.applySIIAccent_Sizer.addSpacing( 4 );
    this.applySIIAccent_Sizer.add( this.applySIIAccent_Button );
    this.applySIIAccent_Sizer.addSpacing( 8 );
    this.applySIIAccent_Sizer.add( this.undoAdvanced_Button );
@@ -8703,10 +8904,14 @@ data.selectedPreviewBoosted = false;
       {
          if ( this.previewSIIHighlightAccent_Control )
             data.previewSIIHighlightAccent = this.previewSIIHighlightAccent_Control.value;
+         if ( this.previewLightnessAmount_Control )
+            data.previewLightnessAmount = this.previewLightnessAmount_Control.value;
+         if ( this.lightnessSource_Combo )
+            data.previewLightnessSource = this.advancedSourceComboIndexToEnum( this.lightnessSource_Combo.currentItem );
          if ( this.previewChannelLightnessAmount_Control )
             data.previewChannelLightnessAmount = this.previewChannelLightnessAmount_Control.value;
          if ( this.channelLightnessSource_Combo )
-            data.previewChannelLightnessSource = this.channelLightnessSource_Combo.currentItem;
+            data.previewChannelLightnessSource = this.advancedSourceComboIndexToEnum( this.channelLightnessSource_Combo.currentItem );
       }
       catch ( e ) {}
    };
@@ -8731,14 +8936,19 @@ data.selectedPreviewBoosted = false;
       var controlsEnabled = !!(!this.finalGenerationBusy && !this.previewGenerationBusy &&
                                this.hasLoadedLargePreviewForControls && this.hasLoadedLargePreviewForControls());
       var goldEnabled = controlsEnabled && data.previewEnableSIIAccent;
-      var lightEnabled = controlsEnabled && data.previewEnableChannelLightness;
-      var implementedLightSource = (data.previewChannelLightnessSource == 0 || data.previewChannelLightnessSource == 1 || data.previewChannelLightnessSource == 2);
+      var lightnessEnabled = controlsEnabled && data.previewEnableLightness;
+      var structureEnabled = controlsEnabled && data.previewEnableChannelLightness;
+      var implementedLightnessSource = (data.previewLightnessSource == 0 || data.previewLightnessSource == 1 || data.previewLightnessSource == 2);
+      var implementedStructureSource = (data.previewChannelLightnessSource == 0 || data.previewChannelLightnessSource == 1 || data.previewChannelLightnessSource == 2);
 
       if ( this.enableSIIAccent_CheckBox ) this.enableSIIAccent_CheckBox.enabled = controlsEnabled;
+      if ( this.enableLightness_CheckBox ) this.enableLightness_CheckBox.enabled = controlsEnabled;
       if ( this.enableChannelLightness_CheckBox ) this.enableChannelLightness_CheckBox.enabled = controlsEnabled;
       this.previewSIIHighlightAccent_Control.enabled = goldEnabled;
-      this.channelLightnessSource_Combo.enabled = lightEnabled;
-      this.previewChannelLightnessAmount_Control.enabled = lightEnabled && implementedLightSource;
+      this.lightnessSource_Combo.enabled = lightnessEnabled;
+      this.previewLightnessAmount_Control.enabled = lightnessEnabled && implementedLightnessSource;
+      this.channelLightnessSource_Combo.enabled = structureEnabled;
+      this.previewChannelLightnessAmount_Control.enabled = structureEnabled && implementedStructureSource;
       this.applySIIAccent_Button.enabled = controlsEnabled && !this.realtimePreviewCalculating && isAnyAdvancedPreviewActive();
       if ( this.undoAdvanced_Button )
          this.undoAdvanced_Button.enabled = controlsEnabled && this.advancedUndoStack.length > 0;
@@ -8752,6 +8962,13 @@ data.selectedPreviewBoosted = false;
       // which Advanced layer will be committed when the user presses Apply;
       // they do not preview/undo the effect live.
       data.previewEnableSIIAccent = checked;
+      dlg.invalidateAdvancedPreviewCache();
+      dlg.refreshAdvancedControlsState();
+   };
+
+   this.enableLightness_CheckBox.onCheck = function( checked )
+   {
+      data.previewEnableLightness = checked;
       dlg.invalidateAdvancedPreviewCache();
       dlg.refreshAdvancedControlsState();
    };
@@ -8775,6 +8992,10 @@ data.selectedPreviewBoosted = false;
    {
       margin = 4;
       spacing = 5;
+      add( this.enableLightness_CheckBox );
+      add( this.lightnessSource_Sizer );
+      add( this.previewLightnessAmount_Control );
+      addSpacing( 8 );
       add( this.enableSIIAccent_CheckBox );
       add( this.previewSIIHighlightAccent_Control );
       addSpacing( 8 );
@@ -9000,7 +9221,7 @@ data.selectedPreviewBoosted = false;
    this.cosmeticPreset_Combo.addItem( "Deep Contrast" );
    this.cosmeticPreset_Combo.addItem( "Foraxx Pop" );
    this.cosmeticPreset_Combo.currentItem = 0;
-   this.cosmeticPreset_Combo.toolTip = "<p>Select a cosmetic preset. Presets adjust Boosted controls and may prepare Advanced settings, but they do not add an Advanced layer until you press <b>Apply</b> in Advanced controls.</p>";
+   this.cosmeticPreset_Combo.toolTip = "<p>Select a cosmetic preset. Presets adjust Boosted controls and may prepare Advanced settings, but they do not add an Advanced layer until you press <b>Calculate &amp; Apply</b> in Advanced controls.</p>";
    this.cosmeticPreset_Combo.onItemSelected = function( index )
    {
       var p = getCosmeticPresetDefinition( index );
@@ -9157,6 +9378,9 @@ data.selectedPreviewBoosted = false;
 
       data.previewEnableSIIAccent = p.enableGold;
       data.previewSIIHighlightAccent = p.goldAmount;
+      data.previewEnableLightness = (p.enableLightness != null) ? p.enableLightness : false;
+      data.previewLightnessSource = (p.lightnessSource != null) ? p.lightnessSource : 0;
+      data.previewLightnessAmount = (p.lightnessAmount != null) ? p.lightnessAmount : 0.0;
       data.previewEnableChannelLightness = p.enableStructure;
       data.previewChannelLightnessSource = p.structureSource;
       data.previewChannelLightnessAmount = p.structureAmount;
@@ -9165,10 +9389,16 @@ data.selectedPreviewBoosted = false;
          this.enableSIIAccent_CheckBox.checked = data.previewEnableSIIAccent;
       if ( this.previewSIIHighlightAccent_Control )
          this.previewSIIHighlightAccent_Control.setValue( data.previewSIIHighlightAccent );
+      if ( this.enableLightness_CheckBox )
+         this.enableLightness_CheckBox.checked = data.previewEnableLightness;
+      if ( this.lightnessSource_Combo )
+         this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewLightnessSource );
+      if ( this.previewLightnessAmount_Control )
+         this.previewLightnessAmount_Control.setValue( data.previewLightnessAmount );
       if ( this.enableChannelLightness_CheckBox )
          this.enableChannelLightness_CheckBox.checked = data.previewEnableChannelLightness;
       if ( this.channelLightnessSource_Combo )
-         this.channelLightnessSource_Combo.currentItem = data.previewChannelLightnessSource;
+         this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewChannelLightnessSource );
       if ( this.previewChannelLightnessAmount_Control )
          this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
       if ( this.boostPresetHint_Label )
@@ -9335,6 +9565,9 @@ data.selectedPreviewBoosted = false;
          boosted: this.captureBoostedControlsState(),
          enableGold: data.previewEnableSIIAccent,
          goldAmount: data.previewSIIHighlightAccent,
+         enableLightness: data.previewEnableLightness,
+         lightnessSource: data.previewLightnessSource,
+         lightnessAmount: data.previewLightnessAmount,
          enableStructure: data.previewEnableChannelLightness,
          structureSource: data.previewChannelLightnessSource,
          structureAmount: data.previewChannelLightnessAmount,
@@ -9351,6 +9584,9 @@ data.selectedPreviewBoosted = false;
 
       data.previewEnableSIIAccent = state.enableGold;
       data.previewSIIHighlightAccent = state.goldAmount;
+      data.previewEnableLightness = !!state.enableLightness;
+      data.previewLightnessSource = (state.lightnessSource != null) ? state.lightnessSource : 2;
+      data.previewLightnessAmount = (state.lightnessAmount != null) ? state.lightnessAmount : 0.0;
       data.previewEnableChannelLightness = state.enableStructure;
       data.previewChannelLightnessSource = state.structureSource;
       data.previewChannelLightnessAmount = state.structureAmount;
@@ -9360,10 +9596,16 @@ data.selectedPreviewBoosted = false;
          this.enableSIIAccent_CheckBox.checked = data.previewEnableSIIAccent;
       if ( this.previewSIIHighlightAccent_Control )
          this.previewSIIHighlightAccent_Control.setValue( data.previewSIIHighlightAccent );
+      if ( this.enableLightness_CheckBox )
+         this.enableLightness_CheckBox.checked = data.previewEnableLightness;
+      if ( this.lightnessSource_Combo )
+         this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewLightnessSource );
+      if ( this.previewLightnessAmount_Control )
+         this.previewLightnessAmount_Control.setValue( data.previewLightnessAmount );
       if ( this.enableChannelLightness_CheckBox )
          this.enableChannelLightness_CheckBox.checked = data.previewEnableChannelLightness;
       if ( this.channelLightnessSource_Combo )
-         this.channelLightnessSource_Combo.currentItem = data.previewChannelLightnessSource;
+         this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewChannelLightnessSource );
       if ( this.previewChannelLightnessAmount_Control )
          this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
       if ( this.lastPreview_CheckBox )
@@ -9695,8 +9937,11 @@ data.selectedPreviewBoosted = false;
          data.previewSIIHighlightAccent = 0.00;
          data.previewSIIAccentActive = false;
          data.previewEnableChannelLightness = false;
-         data.previewChannelLightnessSource = 0;
+         data.previewChannelLightnessSource = 2;
          data.previewChannelLightnessAmount = 0.00;
+         data.previewEnableLightness = false;
+         data.previewLightnessSource = 2;
+         data.previewLightnessAmount = 0.00;
          data.previewEnableStarProtection = false; data.previewEnableMaskProtection = false;
          data.previewStarProtectionAmount = 0.70;
          data.previewShowMaskPreview = false;
@@ -9708,10 +9953,16 @@ data.selectedPreviewBoosted = false;
             this.enableSIIAccent_CheckBox.checked = false;
          if ( this.previewSIIHighlightAccent_Control )
             this.previewSIIHighlightAccent_Control.setValue( 0.00 );
+         if ( this.enableLightness_CheckBox )
+            this.enableLightness_CheckBox.checked = false;
+         if ( this.lightnessSource_Combo )
+            this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( 2 );
+         if ( this.previewLightnessAmount_Control )
+            this.previewLightnessAmount_Control.setValue( 0.00 );
          if ( this.enableChannelLightness_CheckBox )
             this.enableChannelLightness_CheckBox.checked = false;
          if ( this.channelLightnessSource_Combo )
-            this.channelLightnessSource_Combo.currentItem = 0;
+            this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( 2 );
          if ( this.previewChannelLightnessAmount_Control )
             this.previewChannelLightnessAmount_Control.setValue( 0.00 );
          if ( this.lastPreview_CheckBox )
@@ -9811,6 +10062,9 @@ data.selectedPreviewBoosted = false;
       return {
          enableGold: data.previewEnableSIIAccent,
          goldAmount: data.previewSIIHighlightAccent,
+         enableLightness: data.previewEnableLightness,
+         lightnessSource: data.previewLightnessSource,
+         lightnessAmount: data.previewLightnessAmount,
          enableStructure: data.previewEnableChannelLightness,
          structureSource: data.previewChannelLightnessSource,
          structureAmount: data.previewChannelLightnessAmount,
@@ -9825,14 +10079,20 @@ data.selectedPreviewBoosted = false;
       this.realtimeRefreshSuspended = true;
       data.previewEnableSIIAccent = !!c.enableGold;
       data.previewSIIHighlightAccent = (c.goldAmount != null) ? c.goldAmount : 0.0;
+      data.previewEnableLightness = !!c.enableLightness;
+      data.previewLightnessSource = (c.lightnessSource != null) ? c.lightnessSource : 2;
+      data.previewLightnessAmount = (c.lightnessAmount != null) ? c.lightnessAmount : 0.0;
       data.previewEnableChannelLightness = !!c.enableStructure;
-      data.previewChannelLightnessSource = (c.structureSource != null) ? c.structureSource : 0;
+      data.previewChannelLightnessSource = (c.structureSource != null) ? c.structureSource : 2;
       data.previewChannelLightnessAmount = (c.structureAmount != null) ? c.structureAmount : 0.0;
       data.previewShowLastPreview = !!c.showOriginal;
       if ( this.enableSIIAccent_CheckBox ) this.enableSIIAccent_CheckBox.checked = data.previewEnableSIIAccent;
       if ( this.previewSIIHighlightAccent_Control ) this.previewSIIHighlightAccent_Control.setValue( data.previewSIIHighlightAccent );
+      if ( this.enableLightness_CheckBox ) this.enableLightness_CheckBox.checked = data.previewEnableLightness;
+      if ( this.lightnessSource_Combo ) this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewLightnessSource );
+      if ( this.previewLightnessAmount_Control ) this.previewLightnessAmount_Control.setValue( data.previewLightnessAmount );
       if ( this.enableChannelLightness_CheckBox ) this.enableChannelLightness_CheckBox.checked = data.previewEnableChannelLightness;
-      if ( this.channelLightnessSource_Combo ) this.channelLightnessSource_Combo.currentItem = data.previewChannelLightnessSource;
+      if ( this.channelLightnessSource_Combo ) this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewChannelLightnessSource );
       if ( this.previewChannelLightnessAmount_Control ) this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
       if ( this.lastPreview_CheckBox ) this.lastPreview_CheckBox.checked = data.previewShowLastPreview;
       this.realtimeRefreshSuspended = false;
@@ -10076,7 +10336,7 @@ data.selectedPreviewBoosted = false;
 
    this.previewQuality_Combo = new ComboBox( this );
    this.previewQuality_Combo.editEnabled = false;
-   this.previewQuality_Combo.toolTip = "<p>Select the working size used for preview generation.</p><p><b>Balanced</b> is the default mode: sharper than Fast while remaining responsive. Final images are always generated at full resolution.</p>";
+   this.previewQuality_Combo.toolTip = "<p>Select the working size used for preview generation.</p><p><b>Balanced</b> is the default tester mode: sharper than Fast while remaining responsive. Final images are always generated at full resolution.</p>";
    this.previewQuality_Combo.addItem( "Fast" );
    this.previewQuality_Combo.addItem( "Balanced" );
    this.previewQuality_Combo.addItem( "Quality" );
@@ -10146,8 +10406,10 @@ data.selectedPreviewBoosted = false;
    this.luckyPreview_Button.backgroundColor = 0xFFE8DFA3;
    this.luckyPreview_Button.enabled = this.previewsReady;
 
-   this.createPreviews_Button = new PushButton( this );
+   this.createPreviews_Button = new ToolButton( this );
+   this.createPreviews_Button.icon = this.scaledResource( ":/icons/gears.png" );
    this.createPreviews_Button.text = "Create Previews";
+   this.createPreviews_Button.backgroundColor = 0xfff0f0f0;
    this.createPreviews_Button.toolTip = "<p>Create previews for the visible palettes using the selected preview quality. Final images are always full resolution.</p>";
 
    this.finalOutputId_Label = new Label( this );
@@ -10926,8 +11188,8 @@ data.selectedPreviewBoosted = false;
          return;
       }
 
-      // Gold Accent/Structure Lift are Advanced calculations. The normal
-      // realtime key also includes Advanced state so queued Boosted/base
+      // Gold Accent/Structure Lift are Advanced calculations. In i02 the
+      // normal realtime key also includes Advanced state so queued Boosted/base
       // refreshes cannot overwrite the currently visible Advanced preview.
       // Still avoid cache hits during explicit Advanced calculation/Apply.
       var isAdvancedCalculation = data.previewSIIAccentActive === true;
@@ -11291,7 +11553,7 @@ data.selectedPreviewBoosted = false;
       if ( this.enableChannelLightness_CheckBox )
          this.enableChannelLightness_CheckBox.checked = data.previewEnableChannelLightness;
       if ( this.channelLightnessSource_Combo )
-         this.channelLightnessSource_Combo.currentItem = data.previewChannelLightnessSource;
+         this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewChannelLightnessSource );
       if ( this.previewChannelLightnessAmount_Control )
          this.previewChannelLightnessAmount_Control.setValue( data.previewChannelLightnessAmount );
       this.realtimeRefreshSuspended = false;
@@ -11772,10 +12034,10 @@ data.selectedPreviewBoosted = false;
 
    this.collapseSetupSectionsAfterPreview = function()
    {
-      // After previews exist, the user normally works only with Boosted,
-      // Advanced and Presets. Collapse setup sections to recover vertical space.
+      // i02: keep Channel Source visible after Create Previews. Only collapse
+      // secondary setup sections so the user can still inspect/change sources.
       if ( this.image_GroupBox )
-         this.image_GroupBox.hide();
+         this.image_GroupBox.show();
       if ( this.palettee_GroupBox )
          this.palettee_GroupBox.hide();
       this.setLayout();
