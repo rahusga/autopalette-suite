@@ -6734,6 +6734,14 @@ function parametersPrototype()
 
       if ( Parameters.has( "finalOutputId" ) )
          this.finalOutputId = Parameters.getString( "finalOutputId" );
+
+      // i03: old process icons/instances may persist SII as an inactive Advanced
+      // source. When an Advanced tool is not enabled, reset its source to Ha so
+      // the default UI state is consistently Ha/SII/OIII with Ha selected.
+      if ( !this.previewEnableLightness )
+         this.previewLightnessSource = 2;
+      if ( !this.previewEnableChannelLightness )
+         this.previewChannelLightnessSource = 2;
    };
 }
 
@@ -8505,12 +8513,18 @@ data.selectedPreviewBoosted = false;
 
    // i03: UI order is Ha / SII / OIII. Internal enum remains
    // 0=SII, 1=OIII, 2=Ha for compatibility with saved states/stacks.
+   this.advancedSourceOrHa = function( src )
+   {
+      return (src == 0 || src == 1 || src == 2) ? src : 2;
+   };
+
    this.advancedSourceEnumToComboIndex = function( src )
    {
+      src = this.advancedSourceOrHa( src );
       if ( src == 2 ) return 0; // Ha
       if ( src == 0 ) return 1; // SII
       if ( src == 1 ) return 2; // OIII
-      return 1;
+      return 0; // Default UI source: Ha
    };
 
    this.advancedSourceComboIndexToEnum = function( idx )
@@ -8518,7 +8532,7 @@ data.selectedPreviewBoosted = false;
       if ( idx == 0 ) return 2; // Ha
       if ( idx == 1 ) return 0; // SII
       if ( idx == 2 ) return 1; // OIII
-      return 0;
+      return 2; // Default source: Ha
    };
 
    this.enableLightness_CheckBox = new CheckBox( this );
@@ -8536,7 +8550,7 @@ data.selectedPreviewBoosted = false;
    this.lightnessSource_Combo.addItem( "Ha" );
    this.lightnessSource_Combo.addItem( "SII" );
    this.lightnessSource_Combo.addItem( "OIII" );
-   this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewLightnessSource || 0 );
+   this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( this.advancedSourceOrHa( data.previewLightnessSource ) );
    this.lightnessSource_Combo.setFixedWidth( narrowAdvancedSourceWidth );
    this.lightnessSource_Combo.toolTip = "<p>Channel Lightness source. Uses the selected narrowband channel as luminance guidance for the current RGB palette.</p>";
    this.lightnessSource_Combo.onItemSelected = function()
@@ -8594,7 +8608,7 @@ data.selectedPreviewBoosted = false;
    this.channelLightnessSource_Combo.addItem( "Ha" );
    this.channelLightnessSource_Combo.addItem( "SII" );
    this.channelLightnessSource_Combo.addItem( "OIII" );
-   this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewChannelLightnessSource || 0 );
+   this.channelLightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( this.advancedSourceOrHa( data.previewChannelLightnessSource ) );
    this.channelLightnessSource_Combo.setFixedWidth( narrowAdvancedSourceWidth );
    this.channelLightnessSource_Combo.toolTip = "<p>Structure source. SII, OIII and Ha are functional. OIII uses a blue-core selective structure lift.</p>";
    this.channelLightnessSource_Combo.onItemSelected = function()
@@ -9347,8 +9361,27 @@ data.selectedPreviewBoosted = false;
       this.resetBoostedControlsToNeutral( false );
       this.clearLargePreviewCache();
       this.invalidateAdvancedPreviewCache();
-      this.realtimePreviewLastKey = "";
-      this.refreshLargePreviewBoost( true );
+
+      // i02: restored state is authoritative for Undo/Redo as well.
+      // Avoid an immediate neutral refresh that could overwrite the restored view.
+      if ( tile != null && isValidView( tile.previewView ) )
+      {
+         this.largePreviewSourceView = tile.previewView;
+         this.largePreviewBitmap = renderStudioBitmapFromView( tile.previewView, tile.previewView );
+         this.largePreviewBaseBitmap = this.largePreviewBitmap;
+         this.largePreviewBaseKey = this.realtimePreviewParameterKey();
+         this.realtimePreviewLastKey = this.largePreviewBaseKey;
+         this.clearLargePreviewStale();
+         this.hideLargePreviewLoading();
+         this.adjustLargePreviewControlAspect();
+         if ( this.largePreview_Control )
+            this.largePreview_Control.update();
+      }
+      else
+      {
+         this.realtimePreviewLastKey = "";
+         this.refreshLargePreviewBoost( true );
+      }
    };
 
    this.getSelectedPreviewTile = function()
@@ -9480,7 +9513,15 @@ data.selectedPreviewBoosted = false;
             var fallbackView = makeViewCopy( this.largePreviewSourceView, fallbackId );
             if ( isValidView( fallbackView ) )
             {
-               applyPreviewColorBalanceOnlyToView( fallbackView );
+               // i02: fallback commit must include the whole current Boosted
+               // state, not only the final color-balance layer. Some non-Original
+               // palettes can render through a direct/cached preview path without
+               // producing gLastLargePreviewRefinedViewId; committing only color
+               // balance made Apply appear to calculate and then revert after the
+               // controls were reset to neutral.
+               applyBoostedOnlyRefinementsToView( fallbackView );
+               if ( data.previewAutoStretch )
+                  applyDisplayAutoStretchToView( fallbackView, shouldUseLinkedSHODisplayStretch(), "boosted apply fallback display" );
                refinedView = fallbackView;
             }
          }
@@ -9499,8 +9540,23 @@ data.selectedPreviewBoosted = false;
             this.resetBoostedControlsToNeutral( false );
             this.clearLargePreviewCache();
             this.invalidateAdvancedPreviewCache();
-            this.realtimePreviewLastKey = "";
-            this.refreshLargePreviewBoost( true );
+
+            // i02: after Apply, the committed boosted view is authoritative.
+            // Do not run an immediate neutral-control refresh, because that can
+            // reuse/rebuild a base palette path and visually jump back to the
+            // previous preview. The next user edit will refresh from this new
+            // appliedView as the source.
+            this.largePreviewSourceView = appliedView;
+            this.largePreviewBitmap = renderStudioBitmapFromView( appliedView, appliedView );
+            this.largePreviewBaseBitmap = this.largePreviewBitmap;
+            this.largePreviewBaseKey = this.realtimePreviewParameterKey();
+            this.realtimePreviewLastKey = this.largePreviewBaseKey;
+            this.clearLargePreviewStale();
+            this.hideLargePreviewLoading();
+            this.adjustLargePreviewControlAspect();
+            if ( this.largePreview_Control )
+               this.largePreview_Control.update();
+
             if ( this.undoBoosted_Button )
                this.undoBoosted_Button.enabled = true;
          }
@@ -9593,7 +9649,7 @@ data.selectedPreviewBoosted = false;
       data.previewLightnessSource = (state.lightnessSource != null) ? state.lightnessSource : 2;
       data.previewLightnessAmount = (state.lightnessAmount != null) ? state.lightnessAmount : 0.0;
       data.previewEnableChannelLightness = state.enableStructure;
-      data.previewChannelLightnessSource = state.structureSource;
+      data.previewChannelLightnessSource = (state.structureSource != null) ? state.structureSource : 2;
       data.previewChannelLightnessAmount = state.structureAmount;
       data.previewShowLastPreview = state.showOriginal;
 
@@ -11881,7 +11937,7 @@ data.selectedPreviewBoosted = false;
     this.help_Button.toolTip = "Browse Documentation";
     this.help_Button.onClick = function()
     {
-       Dialog.browseScriptDocumentation( "AutoPaletteStudio" );
+       Dialog.browseScriptDocumentation( "AutoPalette Studio" );
     };
 
     this.buttons_Sizer = new HorizontalSizer;
