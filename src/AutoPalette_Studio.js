@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.8 (Jun 2026)
+ * AutoPalette Studio version 1.0.9 (Jun 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -26,6 +26,8 @@
  *       controls and improved linear preview/final consistency.
  * 1.0.8 - Advanced: add Channel Lightness apply layer with Ha/SII/OIII source selector,
  *       Ha default source, stronger response, apply-only workflow and compact source dropdowns.
+ * 1.0.9 - Fix: restore the Foraxx Utility-compatible 3-channel Classic Foraxx
+ *       PIP formula using both O and HO maps; keep bicolor Classic Foraxx unchanged.
  *
  *****************************************************************************/
 
@@ -48,7 +50,7 @@
 
 #feature-id AutoPaletteStudio : Suite Astrocitas > AutoPalette Studio
 #feature-icon icons/AutoPaletteStudio.svg
-#feature-info AutoPalette Studio v1.0.8<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-info AutoPalette Studio v1.0.9<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -63,7 +65,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.8"
+#define VERSION "1.0.9"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -1383,10 +1385,10 @@ function paletteStart(data, progressDialog){
 
 function getRequiredPIPMapIds( data )
 {
-   /* RC4.5: Generate only the PIP helper maps actually consumed by the
-    * selected Foraxx formula. Many expressions contain algebraic no-ops such
-    * as o*HA+~o*HA or ho*OIII+~ho*OIII; these have now been simplified, so
-    * Classic Foraxx can use ho only, while some variants need only o.
+   /* Generate only the PIP helper maps actually consumed by the selected
+    * Foraxx formula. Classic Foraxx with real SII requires both O and HO
+    * maps to match the original Foraxx Palette Utility PIP calculation.
+    * Some variants still simplify algebraic no-ops and need only O or HO.
     */
    if ( data == null )
       return ["o", "ho"];
@@ -1401,6 +1403,8 @@ function getRequiredPIPMapIds( data )
    switch ( data.typePalette )
    {
       case PALETTE_CLASSIC_FORAXX:
+         return ["o", "ho"];
+
       case PALETTE_FORAXX_HSO:
          return ["ho"];
 
@@ -1809,9 +1813,10 @@ function classicForaxx(data){
       return;
    }
 
-   // RC4.5: R and B were algebraic no-ops (o*HA+~o*HA and
-   // o*OIII+~o*OIII). Use the direct channels and require only the ho map.
-   createMultipleRGB(data, HA, "ho*"+OIII+"+~ho*"+SII, OIII, "Foraxx_Classic");
+   // v1.0.9: Restore the original 3-channel Foraxx Palette Utility PIP
+   // calculation. Red is guided by the O map, green by the HO map and blue
+   // remains OIII. Do not simplify this to direct HSO-style channels.
+   createMultipleRGB(data, "o*"+SII+"+~o*"+HA, "ho*"+HA+"+~ho*"+OIII, OIII, "Foraxx_Classic");
 }
 
 function pixelMathFcn(data, exp1, exp2, exp3, exp4, name, color){
@@ -3174,7 +3179,7 @@ function previewExpressionSet( data, index )
             default: return [HA, SII, OIII];
          }
       case PALETTE_CLASSIC_FORAXX:
-         return [HA, ho+"*"+OIII+"+~"+ho+"*"+SII, OIII];
+         return [o+"*"+SII+"+~"+o+"*"+HA, ho+"*"+HA+"+~"+ho+"*"+OIII, OIII];
       case PALETTE_FORAXX_SHO:
          return [o+"*"+SII+"+~"+o+"*"+HA, ho+"*"+HA+"+~"+ho+"*"+OIII, OIII];
       case PALETTE_FORAXX_HOS:
@@ -10402,7 +10407,7 @@ data.selectedPreviewBoosted = false;
 
    this.luckyPreview_Button = new PushButton( this );
    this.luckyPreview_Button.text = "I\'m feeling lucky";
-   this.luckyPreview_Button.toolTip = "<p>Randomly selects one of the available previews and applies a tasteful random Boosted/Advanced preparation. Advanced effects are prepared but not stacked until you press Apply.</p>";
+   this.luckyPreview_Button.toolTip = "<p>Randomly selects one of the available previews and applies a tasteful random Boosted/Advanced preparation. Advanced effects, including Channel Lightness, are prepared but not stacked until you press Calculate &amp; Apply.</p>";
    this.luckyPreview_Button.backgroundColor = 0xFFE8DFA3;
    this.luckyPreview_Button.enabled = this.previewsReady;
 
@@ -11527,10 +11532,15 @@ data.selectedPreviewBoosted = false;
 
       // Pick a restrained Advanced preparation. This mirrors the preset
       // philosophy: it prepares the controls, but the user decides whether to
-      // stack the Advanced layer with Apply.
-      var advancedMode = Math.floor( Math.random()*5 ); // 0 none, 1 gold, 2 structure, 3 both, 4 structure strong
-      var structureSource = Math.floor( Math.random()*3 ); // 0 SII, 1 OIII, 2 Ha
+      // stack the Advanced layer with Calculate & Apply.
+      // i01: include Channel Lightness in the lucky Advanced recipes.
+      var advancedMode = Math.floor( Math.random()*9 );
+      // 0 none, 1 gold, 2 structure, 3 gold+structure, 4 structure strong,
+      // 5 lightness, 6 lightness+gold, 7 lightness+structure, 8 all
+      var structureSource = Math.floor( Math.random()*3 ); // internal enum: 0 SII, 1 OIII, 2 Ha
+      var lightnessSource = Math.floor( Math.random()*3 ); // internal enum: 0 SII, 1 OIII, 2 Ha
       var structureAmount = (advancedMode == 4) ? this.randomRange( 0.430, 0.680 ) : this.randomRange( 0.280, 0.540 );
+      var lightnessAmount = (advancedMode == 6 || advancedMode == 7 || advancedMode == 8) ? this.randomRange( 0.120, 0.340 ) : this.randomRange( 0.180, 0.460 );
 
       this.presetControlsSnapshot = this.capturePresetControlsState();
       if ( this.resetCosmeticPreset_Button )
@@ -11540,12 +11550,21 @@ data.selectedPreviewBoosted = false;
       this.applyBoostedControlsState( boosted );
 
       this.realtimeRefreshSuspended = true;
-      data.previewEnableSIIAccent = (advancedMode == 1 || advancedMode == 3);
+      data.previewEnableLightness = (advancedMode == 5 || advancedMode == 6 || advancedMode == 7 || advancedMode == 8);
+      data.previewLightnessSource = lightnessSource;
+      data.previewLightnessAmount = data.previewEnableLightness ? this.round3( lightnessAmount ) : 0.000;
+      data.previewEnableSIIAccent = (advancedMode == 1 || advancedMode == 3 || advancedMode == 6 || advancedMode == 8);
       data.previewSIIHighlightAccent = data.previewEnableSIIAccent ? this.round3( this.randomRange( 0.120, 0.420 ) ) : 0.000;
-      data.previewEnableChannelLightness = (advancedMode == 2 || advancedMode == 3 || advancedMode == 4);
+      data.previewEnableChannelLightness = (advancedMode == 2 || advancedMode == 3 || advancedMode == 4 || advancedMode == 7 || advancedMode == 8);
       data.previewChannelLightnessSource = structureSource;
       data.previewChannelLightnessAmount = data.previewEnableChannelLightness ? this.round3( structureAmount ) : 0.000;
 
+      if ( this.enableLightness_CheckBox )
+         this.enableLightness_CheckBox.checked = data.previewEnableLightness;
+      if ( this.lightnessSource_Combo )
+         this.lightnessSource_Combo.currentItem = this.advancedSourceEnumToComboIndex( data.previewLightnessSource );
+      if ( this.previewLightnessAmount_Control )
+         this.previewLightnessAmount_Control.setValue( data.previewLightnessAmount );
       if ( this.enableSIIAccent_CheckBox )
          this.enableSIIAccent_CheckBox.checked = data.previewEnableSIIAccent;
       if ( this.previewSIIHighlightAccent_Control )
@@ -11559,7 +11578,7 @@ data.selectedPreviewBoosted = false;
       this.realtimeRefreshSuspended = false;
 
       if ( this.cosmeticPresetHint_Label )
-         this.cosmeticPresetHint_Label.text = "Lucky preset generated: random palette + Boosted values" + (data.previewEnableSIIAccent || data.previewEnableChannelLightness ? ", with Advanced controls prepared. Press Apply in Advanced to stack them." : ". No Advanced layer prepared this time.");
+         this.cosmeticPresetHint_Label.text = "Lucky preset generated: random palette + Boosted values" + (data.previewEnableLightness || data.previewEnableSIIAccent || data.previewEnableChannelLightness ? ", with Advanced controls prepared. Press Calculate & Apply in Advanced to stack them." : ". No Advanced layer prepared this time.");
 
       this.invalidateAdvancedPreviewCache();
       this.clearFrozenAdvancedBase();

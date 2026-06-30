@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.9] - 2026-06-30
+
+### Fixed
+- Restored the original 3-channel **Classic Foraxx** PIP formulation.
+- Classic Foraxx now uses both `O` and `HO` dynamic maps:
+  - `R = O*SII + ~O*Ha`
+  - `G = HO*Ha + ~HO*OIII`
+  - `B = OIII`
+- Preview and final generation now use the same corrected Classic Foraxx formula.
+- Ha/OIII bicolor Classic Foraxx remains unchanged.
+- I'm feeling lucky update to Channel Lightness
+
 ## [1.0.8] - 2026-06-29
 
 This release expands the Advanced workflow with a new Channel Lightness tool and several UI refinements based on tester feedback.
