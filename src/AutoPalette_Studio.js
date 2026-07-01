@@ -1,5 +1,5 @@
 /******************************************************************************
- * AutoPalette Studio version 1.0.9 (Jun 2026)
+ * AutoPalette Studio version 1.1.0 (Jun 2026)
  *
  * Visual narrowband palette studio for PixInsight.
  * Creates and compares HOO/SHO/Foraxx-inspired palettes from OSC dualband
@@ -24,6 +24,7 @@
  * 1.0.7 - Tester build: Balanced preview by default, safer preview-quality
  *       rebuilds, improved Advanced Undo/Redo state, Apply-only Advanced
  *       controls and improved linear preview/final consistency.
+ * 1.0.10 - Mask performance: add LRU caches, enable layered masked preview pipeline, and make Channel Lightness mask-aware.
  * 1.0.8 - Advanced: add Channel Lightness apply layer with Ha/SII/OIII source selector,
  *       Ha default source, stronger response, apply-only workflow and compact source dropdowns.
  * 1.0.9 - Fix: restore the Foraxx Utility-compatible 3-channel Classic Foraxx
@@ -50,7 +51,7 @@
 
 #feature-id AutoPaletteStudio : Suite Astrocitas > AutoPalette Studio
 #feature-icon icons/AutoPaletteStudio.svg
-#feature-info AutoPalette Studio v1.0.9<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
+#feature-info AutoPalette Studio v1.1.0<br/><br/>Visual narrowband palette studio for OSC dualband and monochrome Ha/OIII/SII images. Create base palette previews, refine them with Cosmetic Presets, Boosted and Advanced apply layers, use mask protection, and generate full-resolution RGB outputs with preview/final parity.
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -65,7 +66,7 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/SectionBar.jsh>
 
-#define VERSION "1.0.9"
+#define VERSION "1.1.0"
 #define TITLE "AutoPalette Studio"
 
 // SCC-like section body background colors for compact visual grouping.
@@ -154,11 +155,19 @@ var gActiveStarMaskViewId = "";
 var gStarMaskCacheKey = "";
 var gStarMaskCacheViewId = "";
 var gStarMaskComputationInProgress = false;
-// v1.0.5: Cache the rendered mask-preview bitmap as well. When the user keeps
-// the same palette and mask parameters active, Boosted/Advanced slider changes
-// can reuse the already rendered preview-mask bitmap instead of rebuilding it.
-var gMaskPreviewBitmapCacheKey = "";
-var gMaskPreviewBitmapCache = null;
+// v1.0.10: keep a small LRU of generated masks. Star Protection masks are
+// expensive (CIEL + MLT + curves + blur), and users often alternate between
+// palettes, mask preview and Boosted/Advanced adjustments. A single-entry cache
+// forced unnecessary recalculation; this LRU keeps recent mask/source/amount
+// combinations alive while still limiting hidden _APS_ windows.
+var STAR_MASK_CACHE_LIMIT = 8;
+var gStarMaskCacheEntries = [];
+// v1.0.10: the rendered mask-preview bitmap also uses a small LRU. This avoids
+// repainting mask previews when returning to a recently used palette/amount.
+var MASK_PREVIEW_BITMAP_CACHE_LIMIT = 8;
+var gMaskPreviewBitmapCacheEntries = [];
+var gExternalMaskCacheKey = "";
+var gExternalMaskCacheViewId = "";
 
 function starMaskCacheKeyForView( sourceView )
 {
@@ -171,29 +180,78 @@ function starMaskCacheKeyForView( sourceView )
           "|invert=" + (data.previewInvertMask ? "1" : "0");
 }
 
+function removeStarMaskCacheEntryAt( index, closeWindow )
+{
+   if ( index < 0 || index >= gStarMaskCacheEntries.length )
+      return;
+   var entry = gStarMaskCacheEntries[index];
+   gStarMaskCacheEntries.splice( index, 1 );
+   if ( closeWindow && entry != null && entry.viewId != null && entry.viewId.length > 0 )
+      safeForceCloseWindowById( entry.viewId );
+}
+
+function promoteStarMaskCacheEntry( index )
+{
+   if ( index <= 0 || index >= gStarMaskCacheEntries.length )
+      return;
+   var entry = gStarMaskCacheEntries[index];
+   gStarMaskCacheEntries.splice( index, 1 );
+   gStarMaskCacheEntries.unshift( entry );
+}
+
 function getCachedStarMaskViewForKey( key )
 {
-   if ( key == null || key.length == 0 || key != gStarMaskCacheKey ||
-        gStarMaskCacheViewId == null || gStarMaskCacheViewId.length == 0 )
+   if ( key == null || key.length == 0 )
       return null;
 
-   var mv = View.viewById( gStarMaskCacheViewId );
-   if ( isValidView( mv ) )
+   for ( var i = 0; i < gStarMaskCacheEntries.length; ++i )
    {
-      gActiveStarMaskViewId = gStarMaskCacheViewId;
-      return mv;
+      var entry = gStarMaskCacheEntries[i];
+      if ( entry != null && entry.key == key && entry.viewId != null && entry.viewId.length > 0 )
+      {
+         var mv = View.viewById( entry.viewId );
+         if ( isValidView( mv ) )
+         {
+            promoteStarMaskCacheEntry( i );
+            gActiveStarMaskViewId = entry.viewId;
+            gStarMaskCacheKey = entry.key;
+            gStarMaskCacheViewId = entry.viewId;
+            apsProfileCacheNote( "mask view", true );
+            return mv;
+         }
+         removeStarMaskCacheEntryAt( i, false );
+         break;
+      }
    }
 
+   apsProfileCacheNote( "mask view", false );
    gStarMaskCacheKey = "";
    gStarMaskCacheViewId = "";
    gActiveStarMaskViewId = "";
    return null;
 }
 
+function storeStarMaskCacheViewForKey( key, viewId )
+{
+   if ( key == null || key.length == 0 || viewId == null || viewId.length == 0 )
+      return;
+
+   for ( var i = gStarMaskCacheEntries.length-1; i >= 0; --i )
+      if ( gStarMaskCacheEntries[i].key == key || gStarMaskCacheEntries[i].viewId == viewId )
+         removeStarMaskCacheEntryAt( i, false );
+
+   gStarMaskCacheEntries.unshift( { key: key, viewId: viewId } );
+   gStarMaskCacheKey = key;
+   gStarMaskCacheViewId = viewId;
+   gActiveStarMaskViewId = viewId;
+
+   while ( gStarMaskCacheEntries.length > STAR_MASK_CACHE_LIMIT )
+      removeStarMaskCacheEntryAt( gStarMaskCacheEntries.length-1, true );
+}
+
 function clearMaskPreviewBitmapCache()
 {
-   gMaskPreviewBitmapCacheKey = "";
-   gMaskPreviewBitmapCache = null;
+   gMaskPreviewBitmapCacheEntries = [];
 }
 
 function maskPreviewBitmapCacheKeyForView( sourceView )
@@ -206,8 +264,22 @@ function maskPreviewBitmapCacheKeyForView( sourceView )
 function getCachedMaskPreviewBitmapForView( sourceView )
 {
    var key = maskPreviewBitmapCacheKeyForView( sourceView );
-   if ( key.length > 0 && key == gMaskPreviewBitmapCacheKey && gMaskPreviewBitmapCache != null )
-      return gMaskPreviewBitmapCache;
+   if ( key.length == 0 )
+      return null;
+
+   for ( var i = 0; i < gMaskPreviewBitmapCacheEntries.length; ++i )
+   {
+      var entry = gMaskPreviewBitmapCacheEntries[i];
+      if ( entry != null && entry.key == key && entry.bitmap != null )
+      {
+         gMaskPreviewBitmapCacheEntries.splice( i, 1 );
+         gMaskPreviewBitmapCacheEntries.unshift( entry );
+         apsProfileCacheNote( "mask preview bitmap", true );
+         return entry.bitmap;
+      }
+   }
+
+   apsProfileCacheNote( "mask preview bitmap", false );
    return null;
 }
 
@@ -216,8 +288,14 @@ function storeMaskPreviewBitmapCacheForView( sourceView, bitmap )
    var key = maskPreviewBitmapCacheKeyForView( sourceView );
    if ( key.length == 0 || bitmap == null )
       return;
-   gMaskPreviewBitmapCacheKey = key;
-   gMaskPreviewBitmapCache = bitmap;
+
+   for ( var i = gMaskPreviewBitmapCacheEntries.length-1; i >= 0; --i )
+      if ( gMaskPreviewBitmapCacheEntries[i].key == key )
+         gMaskPreviewBitmapCacheEntries.splice( i, 1 );
+
+   gMaskPreviewBitmapCacheEntries.unshift( { key: key, bitmap: bitmap } );
+   while ( gMaskPreviewBitmapCacheEntries.length > MASK_PREVIEW_BITMAP_CACHE_LIMIT )
+      gMaskPreviewBitmapCacheEntries.pop();
 }
 
 function invertMaskViewInPlace( view )
@@ -264,6 +342,25 @@ function applyMaskInversionIfRequested( view )
 
 function invalidateStarMaskCache()
 {
+   // v1.0.10: Do not destroy the LRU cache on every slider/preset change.
+   // The mask key includes source/preset/amount/invert, so stale masks are not
+   // reused accidentally. Clearing only the active pointer allows recent masks
+   // to be reused when the user returns to a previous setting.
+   gStarMaskCacheKey = "";
+   gStarMaskCacheViewId = "";
+   gActiveStarMaskViewId = "";
+   if ( gExternalMaskCacheViewId != null && gExternalMaskCacheViewId.length > 0 )
+      safeForceCloseWindowById( gExternalMaskCacheViewId );
+   gExternalMaskCacheKey = "";
+   gExternalMaskCacheViewId = "";
+}
+
+function clearAllStarMaskCaches()
+{
+   for ( var i = 0; i < gStarMaskCacheEntries.length; ++i )
+      if ( gStarMaskCacheEntries[i] != null && gStarMaskCacheEntries[i].viewId != null )
+         safeForceCloseWindowById( gStarMaskCacheEntries[i].viewId );
+   gStarMaskCacheEntries = [];
    gStarMaskCacheKey = "";
    gStarMaskCacheViewId = "";
    gActiveStarMaskViewId = "";
@@ -1302,8 +1399,17 @@ function paletteStart(data, progressDialog){
       return false;
    }
 
-   if (!data.isOSC)
+   if ( !data.isOSC )
+   {
+      var finalNbError = getNarrowbandReferenceValidationError( data.referenceHA, data.referenceOIII, data.referenceSII, "final generation" );
+      if ( finalNbError.length > 0 )
+      {
+         (new MessageBox( finalNbError, TITLE, StdIcon_Error, StdButton_Ok )).execute();
+         apsClearFinalProgress( progressDialog );
+         return false;
+      }
       data.currentView = data.referenceHA;
+   }
 
    /* RC2.2: Preserve the user's original monochrome band views before any
     * internal LinearFit/normalization or linear-working-copy substitution.
@@ -1315,6 +1421,20 @@ function paletteStart(data, progressDialog){
    data.finalOriginalHA = data.referenceHA;
    data.finalOriginalOIII = data.referenceOIII;
    data.finalOriginalSII = data.referenceSII;
+
+   if ( isExternalMaskActive() )
+   {
+      var finalMaskError = getExternalMaskValidationError( data.previewExternalMaskView,
+                                                           data.referenceHA, data.referenceOIII, data.referenceSII,
+                                                           data.currentView, "final generation" );
+      if ( finalMaskError.length > 0 )
+      {
+         (new MessageBox( finalMaskError, TITLE, StdIcon_Error, StdButton_Ok )).execute();
+         apsClearFinalProgress( progressDialog );
+         return false;
+      }
+      invalidateStarMaskCache();
+   }
 
    apsUpdateFinalProgress( progressDialog, 30, "Preparing working views..." );
    var apsStageStart = apsNowMs();
@@ -2426,6 +2546,74 @@ function makeViewCopy( sourceView, newId )
    return win.mainView;
 }
 
+
+function isGrayscaleSourceView( v )
+{
+   return isValidView( v ) && ( !v.image.isColor || v.image.numberOfChannels == 1 );
+}
+
+function viewsHaveSameGeometry( a, b )
+{
+   return isValidView( a ) && isValidView( b ) &&
+          a.image.width == b.image.width &&
+          a.image.height == b.image.height;
+}
+
+function firstValidMaskReferenceView( haView, oiiiView, siiView, fallbackView )
+{
+   if ( isValidView( haView ) ) return haView;
+   if ( isValidView( oiiiView ) ) return oiiiView;
+   if ( isValidView( siiView ) ) return siiView;
+   if ( isValidView( fallbackView ) ) return fallbackView;
+   return null;
+}
+
+function getNarrowbandReferenceValidationError( haView, oiiiView, siiView, contextLabel )
+{
+   var ctx = (contextLabel != null && contextLabel.length > 0) ? contextLabel : "narrowband source selection";
+
+   if ( isValidView( haView ) && !isGrayscaleSourceView( haView ) )
+      return "The selected Ha view must be a grayscale/monochrome image for " + ctx + ".";
+   if ( isValidView( oiiiView ) && !isGrayscaleSourceView( oiiiView ) )
+      return "The selected OIII view must be a grayscale/monochrome image for " + ctx + ".";
+   if ( isValidView( siiView ) && !isGrayscaleSourceView( siiView ) )
+      return "The selected SII view must be a grayscale/monochrome image for " + ctx + ".";
+
+   var ref = firstValidMaskReferenceView( haView, oiiiView, siiView, null );
+   if ( isValidView( ref ) )
+   {
+      if ( isValidView( haView ) && !viewsHaveSameGeometry( ref, haView ) )
+         return "All selected DBXtract/mono source views must have the same dimensions for " + ctx + ".";
+      if ( isValidView( oiiiView ) && !viewsHaveSameGeometry( ref, oiiiView ) )
+         return "All selected DBXtract/mono source views must have the same dimensions for " + ctx + ".";
+      if ( isValidView( siiView ) && !viewsHaveSameGeometry( ref, siiView ) )
+         return "All selected DBXtract/mono source views must have the same dimensions for " + ctx + ".";
+   }
+
+   return "";
+}
+
+function getExternalMaskValidationError( maskView, haView, oiiiView, siiView, fallbackView, contextLabel )
+{
+   if ( !isValidView( maskView ) )
+      return "Please select a valid external grayscale mask view.";
+
+   if ( !isGrayscaleSourceView( maskView ) )
+      return "The external mask must be a grayscale/monochrome image.";
+
+   var ref = firstValidMaskReferenceView( haView, oiiiView, siiView, fallbackView );
+   if ( !isValidView( ref ) )
+      return "";
+
+   if ( maskView.image.width != ref.image.width || maskView.image.height != ref.image.height )
+   {
+      var ctx = (contextLabel != null && contextLabel.length > 0) ? " for " + contextLabel : "";
+      return "The external mask must have the same dimensions as the selected source views" + ctx + ".";
+   }
+
+   return "";
+}
+
 function downsamplePreviewView( view )
 {
    if ( !isValidView( view ) )
@@ -3039,6 +3227,13 @@ function createPreviewSourceData( sourceData )
          return null;
       }
 
+      var previewNbError = getNarrowbandReferenceValidationError( sourceData.referenceHA, sourceData.referenceOIII, sourceData.referenceSII, "preview generation" );
+      if ( previewNbError.length > 0 )
+      {
+         (new MessageBox( previewNbError, TITLE, StdIcon_Error, StdButton_Ok )).execute();
+         return null;
+      }
+
       pData.referenceHA = makeViewCopy( sourceData.referenceHA, PREVIEW_PREFIX + "HA" );
       pData.referenceOIII = makeViewCopy( sourceData.referenceOIII, PREVIEW_PREFIX + "OIII" );
       pData.originalReferenceHA = makeViewCopy( sourceData.referenceHA, PREVIEW_PREFIX + "ORIG_HA" );
@@ -3064,6 +3259,19 @@ function createPreviewSourceData( sourceData )
 
    if ( !isValidView( pData.referenceHA ) || !isValidView( pData.referenceOIII ) )
       return null;
+
+   if ( isExternalMaskActive() )
+   {
+      var previewMaskError = getExternalMaskValidationError( data.previewExternalMaskView,
+                                                             sourceData.referenceHA, sourceData.referenceOIII, sourceData.referenceSII,
+                                                             sourceData.currentView, "preview generation" );
+      if ( previewMaskError.length > 0 )
+      {
+         (new MessageBox( previewMaskError, TITLE, StdIcon_Error, StdButton_Ok )).execute();
+         return null;
+      }
+      invalidateStarMaskCache();
+   }
 
    if ( sourceData.linearFit )
    {
@@ -3294,14 +3502,19 @@ function isFaintRedMaskActive()
    return isMaskProtectionActive() && ((data.previewMaskPreset || 0) == 3);
 }
 
+function isExternalMaskActive()
+{
+   return isMaskProtectionActive() && ((data.previewMaskPreset || 0) == 4);
+}
+
 function isSelectiveApplicationMaskActive()
 {
-   return isBlueCoreMaskActive() || isWarmGoldMaskActive() || isFaintRedMaskActive();
+   return isBlueCoreMaskActive() || isWarmGoldMaskActive() || isFaintRedMaskActive() || isExternalMaskActive();
 }
 
 function isAnyMaskActive()
 {
-   return isStarProtectionMaskActive() || isBlueCoreMaskActive() || isWarmGoldMaskActive() || isFaintRedMaskActive();
+   return isStarProtectionMaskActive() || isBlueCoreMaskActive() || isWarmGoldMaskActive() || isFaintRedMaskActive() || isExternalMaskActive();
 }
 
 function buildStarProtectionMaskExpressionFromRGB( R, G, B )
@@ -3898,9 +4111,7 @@ function createSmallScaleStarMaskView( sourceView )
       intensifyMaskView( maskView, 1.55 + 0.85*a );
       applyMaskInversionIfRequested( maskView );
 
-      gActiveStarMaskViewId = maskId;
-      gStarMaskCacheKey = cacheKey;
-      gStarMaskCacheViewId = maskId;
+      storeStarMaskCacheViewForKey( cacheKey, maskId );
       gStarMaskComputationInProgress = false;
       return maskView;
    }
@@ -3961,9 +4172,7 @@ function createBlueCoreMaskView( sourceView )
       intensifyMaskView( maskView, 1.02 + 0.42*a );
       applyMaskInversionIfRequested( maskView );
 
-      gActiveStarMaskViewId = maskId;
-      gStarMaskCacheKey = cacheKey;
-      gStarMaskCacheViewId = maskId;
+      storeStarMaskCacheViewForKey( cacheKey, maskId );
       gStarMaskComputationInProgress = false;
       return maskView;
    }
@@ -4019,9 +4228,7 @@ function createWarmGoldMaskView( sourceView )
       intensifyMaskView( maskView, 1.05 + 0.40*a );
       applyMaskInversionIfRequested( maskView );
 
-      gActiveStarMaskViewId = maskId;
-      gStarMaskCacheKey = cacheKey;
-      gStarMaskCacheViewId = maskId;
+      storeStarMaskCacheViewForKey( cacheKey, maskId );
       gStarMaskComputationInProgress = false;
       return maskView;
    }
@@ -4080,9 +4287,7 @@ function createFaintRedMaskView( sourceView )
       intensifyMaskView( maskView, 1.14 + 0.32*a );
       applyMaskInversionIfRequested( maskView );
 
-      gActiveStarMaskViewId = maskId;
-      gStarMaskCacheKey = cacheKey;
-      gStarMaskCacheViewId = maskId;
+      storeStarMaskCacheViewForKey( cacheKey, maskId );
       gStarMaskComputationInProgress = false;
       return maskView;
    }
@@ -4092,6 +4297,64 @@ function createFaintRedMaskView( sourceView )
       Console.warningln( "Faint Red mask generation skipped: ", e );
       return null;
    }
+}
+
+function createExternalMaskPreviewView( sourceView )
+{
+   gActiveStarMaskViewId = "";
+
+   if ( !isExternalMaskActive() || !isValidView( data.previewExternalMaskView ) )
+      return null;
+
+   var refBase = firstValidMaskReferenceView( data.referenceHA, data.referenceOIII, data.referenceSII, sourceView );
+   var err = getExternalMaskValidationError( data.previewExternalMaskView,
+                                             data.referenceHA, data.referenceOIII, data.referenceSII,
+                                             refBase, "the current workflow" );
+   if ( err.length > 0 )
+      return null;
+
+   var targetW = isValidView( sourceView ) ? sourceView.image.width : data.previewExternalMaskView.image.width;
+   var targetH = isValidView( sourceView ) ? sourceView.image.height : data.previewExternalMaskView.image.height;
+   var key = data.previewExternalMaskView.id + "|" + targetW + "x" + targetH + "|inv=" + (data.previewInvertMask ? "1" : "0");
+
+   if ( gExternalMaskCacheKey == key )
+   {
+      var cached = View.viewById( gExternalMaskCacheViewId );
+      if ( isValidView( cached ) )
+      {
+         gActiveStarMaskViewId = cached.id;
+         return cached;
+      }
+   }
+
+   if ( gExternalMaskCacheViewId != null && gExternalMaskCacheViewId.length > 0 )
+      safeForceCloseWindowById( gExternalMaskCacheViewId );
+   gExternalMaskCacheKey = "";
+   gExternalMaskCacheViewId = "";
+
+   var id = PREVIEW_PREFIX + "MASK_EXTERNAL";
+   var v = makeViewCopy( data.previewExternalMaskView, id );
+   if ( !isValidView( v ) )
+      return null;
+
+   if ( isValidView( sourceView ) &&
+        (v.image.width != sourceView.image.width || v.image.height != sourceView.image.height) )
+      downsamplePreviewView( v );
+
+   if ( isValidView( sourceView ) &&
+        (v.image.width != sourceView.image.width || v.image.height != sourceView.image.height) )
+   {
+      safeForceCloseWindowById( id );
+      return null;
+   }
+
+   if ( data.previewInvertMask )
+      runPreviewPixelMathOnView( v, "1-$T", false );
+
+   gExternalMaskCacheKey = key;
+   gExternalMaskCacheViewId = v.id;
+   gActiveStarMaskViewId = v.id;
+   return v;
 }
 
 function createSelectedMaskView( sourceView )
@@ -4104,6 +4367,8 @@ function createSelectedMaskView( sourceView )
       return createWarmGoldMaskView( sourceView );
    if ( isFaintRedMaskActive() )
       return createFaintRedMaskView( sourceView );
+   if ( isExternalMaskActive() )
+      return createExternalMaskPreviewView( sourceView );
    gActiveStarMaskViewId = "";
    return null;
 }
@@ -4118,6 +4383,8 @@ function buildRawSelectedMaskExpressionFromRGB( R, G, B )
       return buildWarmGoldMaskExpressionFromRGB( R, G, B );
    if ( isFaintRedMaskActive() )
       return buildFaintRedMaskExpressionFromRGB( R, G, B );
+   if ( isExternalMaskActive() )
+      return (gActiveStarMaskViewId != null && gActiveStarMaskViewId.length > 0) ? gActiveStarMaskViewId : "0";
    return "0";
 }
 
@@ -4194,6 +4461,20 @@ function buildStarProtectionEffectScaleExpression( R, G, B )
    }
 
    return clipExpr( "1-(" + M + ")" );
+}
+
+function buildMaskAwareEffectExpression( originalExpr, processedExpr, R, G, B )
+{
+   function clipExpr( e )
+   {
+      return "min(1,max(0,(" + e + ")))";
+   }
+
+   if ( !isAnyMaskActive() )
+      return processedExpr;
+
+   var effectScale = buildStarProtectionEffectScaleExpression( R, G, B );
+   return clipExpr( "(" + originalExpr + ")*(1-(" + effectScale + "))+(" + processedExpr + ")*(" + effectScale + ")" );
 }
 
 function buildUnifiedRefinementExpressions( R, G, B, values )
@@ -4480,13 +4761,30 @@ function buildPreviewToneSaturationExpressionsForTarget()
    return [ r, g, b ];
 }
 
-function applyPreviewToneSaturationOnlyToView( view )
+function applyPreviewToneSaturationOnlyToView( view, maskReferenceView )
 {
    if ( !isValidView( view ) || view.image.numberOfChannels != 3 || !hasToneSaturationPreviewRefinementsToApply() )
       return;
 
    var apsToneOnlyStart = apsNowMs();
    var exprs = buildPreviewToneSaturationExpressionsForTarget();
+
+   // v1.0.10: when a mask is active, keep the layered preview path visually
+   // consistent with the previous unified path by applying tone/saturation only
+   // through the same protection/selection mask built from the original palette
+   // source. This allows cached structural/tone stages with masks enabled.
+   if ( isAnyMaskActive() && isValidView( maskReferenceView ) )
+   {
+      var r0 = maskReferenceView.id + "[0]";
+      var g0 = maskReferenceView.id + "[1]";
+      var b0 = maskReferenceView.id + "[2]";
+      exprs = [
+         buildMaskAwareEffectExpression( r0, exprs[0], r0, g0, b0 ),
+         buildMaskAwareEffectExpression( g0, exprs[1], r0, g0, b0 ),
+         buildMaskAwareEffectExpression( b0, exprs[2], r0, g0, b0 )
+      ];
+   }
+
    view.beginProcess( UndoFlag_NoSwapFile );
    var P = new PixelMath;
    P.expression = exprs[0];
@@ -4980,9 +5278,10 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
       //   C: tone/saturation (brightness/contrast/saturation)
       //   D: SCC-like color and Advanced pending effects
       // This preserves C/D slider values when B changes, but avoids rebuilding
-      // B when only C or D controls move.  Masks are kept on the legacy unified
-      // path because they can intentionally blend back to the original source.
-      var useLayeredCache = !isAnyMaskActive();
+      // B when only C or D controls move.  v1.0.10 also keeps masks on this
+      // layered path: generated masks use an LRU cache and tone/saturation is
+      // blended through the same protection/selection mask as the unified path.
+      var useLayeredCache = true;
 
       if ( useLayeredCache )
       {
@@ -5057,7 +5356,7 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
                apsProfileLog( "tone/saturation makeViewCopy", apsToneCopyStart );
                if ( isValidView( toneView ) )
                {
-                  applyPreviewToneSaturationOnlyToView( toneView );
+                  applyPreviewToneSaturationOnlyToView( toneView, view );
                   gLargePreviewToneSatBaseViewId = toneId;
                   gLargePreviewToneSatBaseKey = toneKey;
                   apsProfileLog( "large preview tone/saturation layer", apsToneStart );
@@ -5167,10 +5466,12 @@ function createLargePreviewPanelBitmap( view, skipAdvancedStack )
                applyAdvancedLayerStackToView( colorViewLegacy );
             if ( pendingAdvancedEnabled )
             {
-               if ( goldEnabled )
-                  applyGoldAccentOnlyToView( colorViewLegacy );
+               if ( lightnessEnabled )
+                  applyLightnessOnlyToView( colorViewLegacy );
                if ( channelLightnessEnabled )
                   applyChannelLightnessOnlyToView( colorViewLegacy );
+               if ( goldEnabled )
+                  applyGoldAccentOnlyToView( colorViewLegacy );
             }
             if ( data.previewAutoStretch )
                applyDisplayAutoStretchToView( colorViewLegacy, shouldUseLinkedSHODisplayStretch(), "large refined display" );
@@ -5427,10 +5728,14 @@ function applyLightnessOnlyToView( view )
    var Lmix = "((1-(" + a + "))*(" + Y + ")+(" + a + ")*(" + S + "))";
    var gain = "min(4,max(0,(" + Lmix + ")/(" + Y + ")))";
 
+   var rLight = clipExpr( "(" + R + ")*(" + gain + ")" );
+   var gLight = clipExpr( "(" + G + ")*(" + gain + ")" );
+   var bLight = clipExpr( "(" + B + ")*(" + gain + ")" );
+
    var exprs = [
-      clipExpr( "(" + R + ")*(" + gain + ")" ),
-      clipExpr( "(" + G + ")*(" + gain + ")" ),
-      clipExpr( "(" + B + ")*(" + gain + ")" )
+      buildMaskAwareEffectExpression( R, rLight, R, G, B ),
+      buildMaskAwareEffectExpression( G, gLight, R, G, B ),
+      buildMaskAwareEffectExpression( B, bLight, R, G, B )
    ];
 
    applyRGBPixelMathInPlace( view, exprs, "Channel Lightness PixelMath" );
@@ -5933,6 +6238,9 @@ function advancedLayerEquals( a, b )
       return false;
    return (!!a.goldEnabled == !!b.goldEnabled) &&
           Math.abs((a.goldAmount || 0.0) - (b.goldAmount || 0.0)) < 1e-6 &&
+          (!!a.lightnessEnabled == !!b.lightnessEnabled) &&
+          ((a.lightnessSource || 0) == (b.lightnessSource || 0)) &&
+          Math.abs((a.lightnessAmount || 0.0) - (b.lightnessAmount || 0.0)) < 1e-6 &&
           (!!a.channelEnabled == !!b.channelEnabled) &&
           ((a.channelSource || 0) == (b.channelSource || 0)) &&
           Math.abs((a.channelAmount || 0.0) - (b.channelAmount || 0.0)) < 1e-6;
@@ -5941,7 +6249,7 @@ function advancedLayerEquals( a, b )
 function currentAdvancedLayerAlreadyCommitted()
 {
    var current = captureCurrentAdvancedLayer();
-   if ( !(current.goldEnabled || current.channelEnabled) )
+   if ( !(current.goldEnabled || current.lightnessEnabled || current.channelEnabled) )
       return true;
    var stack = data.previewAdvancedLayerStack || [];
    if ( stack.length == 0 )
@@ -5960,6 +6268,7 @@ function applyPreviewRefinementsToView( view )
       return;
 
    var goldEnabled = data.previewEnableSIIAccent && Math.abs((data.previewSIIHighlightAccent || 0.0)) > 1e-6;
+   var lightnessEnabled = isLightnessActive();
    var channelLightnessEnabled = isChannelLightnessActive();
 
    if ( isAnyMaskActive() )
@@ -5981,12 +6290,14 @@ function applyPreviewRefinementsToView( view )
    if ( data.previewAdvancedLayerStack != null && data.previewAdvancedLayerStack.length > 0 )
       applyAdvancedLayerStackToView( view );
 
-   if ( (goldEnabled || channelLightnessEnabled) && !currentAdvancedLayerAlreadyCommitted() )
+   if ( (goldEnabled || lightnessEnabled || channelLightnessEnabled) && !currentAdvancedLayerAlreadyCommitted() )
    {
-      if ( goldEnabled )
-         applyGoldAccentOnlyToView( view );
+      if ( lightnessEnabled )
+         applyLightnessOnlyToView( view );
       if ( channelLightnessEnabled )
          applyChannelLightnessOnlyToView( view );
+      if ( goldEnabled )
+         applyGoldAccentOnlyToView( view );
    }
 }
 
@@ -6490,7 +6801,8 @@ function parametersPrototype()
       this.previewLightnessAmount = 0.00;
       this.previewEnableStarProtection = false; // legacy alias
       this.previewEnableMaskProtection = false;
-      this.previewMaskPreset = 0; // 0=Star protection, 1=Blue Core, 2=Warm/Gold, 3=Faint Red
+      this.previewMaskPreset = 0; // 0=Star protection, 1=Blue Core, 2=Warm/Gold, 3=Faint Red, 4=External View
+      this.previewExternalMaskView = null;
       this.previewStarProtectionAmount = 0.70;
       this.previewShowMaskPreview = false;
       this.previewInvertMask = false;
@@ -6552,6 +6864,7 @@ function parametersPrototype()
       Parameters.set( "previewEnableStarProtection", this.previewEnableStarProtection );
       Parameters.set( "previewEnableMaskProtection", this.previewEnableMaskProtection );
       Parameters.set( "previewMaskPreset", this.previewMaskPreset );
+      if(isValidView(this.previewExternalMaskView)) Parameters.set( "previewExternalMaskView", this.previewExternalMaskView.id );
       Parameters.set( "previewStarProtectionAmount", this.previewStarProtectionAmount );
       Parameters.set( "previewShowMaskPreview", this.previewShowMaskPreview );
       Parameters.set( "previewInvertMask", this.previewInvertMask );
@@ -6702,6 +7015,9 @@ function parametersPrototype()
 
       if ( Parameters.has( "previewMaskPreset" ) )
          this.previewMaskPreset = Parameters.getInteger( "previewMaskPreset" );
+
+      if ( Parameters.has( "previewExternalMaskView" ) )
+         this.previewExternalMaskView = View.viewById( Parameters.getString( "previewExternalMaskView" ) );
 
       if ( Parameters.has( "previewStarProtectionAmount" ) )
          this.previewStarProtectionAmount = Parameters.getReal( "previewStarProtectionAmount" );
@@ -6992,6 +7308,38 @@ function autopaletteMain() {
       }
    }
 
+   this.restoreComboSelection = function( combo, oldView )
+   {
+      if ( !combo )
+         return;
+      if ( isValidView( oldView ) )
+         setComboToView( combo, oldView );
+      else
+         combo.currentItem = 0;
+   };
+
+   this.validateNarrowbandSourceSelection = function( candidateHa, candidateOiii, candidateSii )
+   {
+      var err = getNarrowbandReferenceValidationError( candidateHa, candidateOiii, candidateSii, "DBXtract/mono source selection" );
+      if ( err.length > 0 )
+      {
+         (new MessageBox( err, TITLE, StdIcon_Error, StdButton_Ok )).execute();
+         return false;
+      }
+      return true;
+   };
+
+   this.validateExternalMaskSelection = function( candidateMask )
+   {
+      var err = getExternalMaskValidationError( candidateMask, data.referenceHA, data.referenceOIII, data.referenceSII, data.currentView, "the current source selection" );
+      if ( err.length > 0 )
+      {
+         (new MessageBox( err, TITLE, StdIcon_Error, StdButton_Ok )).execute();
+         return false;
+      }
+      return true;
+   };
+
    this.autoDetectNarrowbandViews = function()
    {
       var ha = findBestNarrowbandViewByRole( "HA", [ HA_NAME, "_HA", "HA", "Ha", "ha", "Halfa", "halfa", "Halpha", "halpha", "DBX_HA", "DBX_Ha", "DBXtract_HA" ] );
@@ -7207,7 +7555,14 @@ function autopaletteMain() {
    setupFilteredViewCombo( this.referenceHA_ViewList, data.referenceHA, false, true, "<No View Selected>",
       function( view )
       {
+         var oldView = data.referenceHA;
+         if ( isValidView( view ) && !dlg.validateNarrowbandSourceSelection( view, data.referenceOIII, data.referenceSII ) )
+         {
+            dlg.restoreComboSelection( dlg.referenceHA_ViewList, oldView );
+            return;
+         }
          data.referenceHA = view;
+         invalidateStarMaskCache();
          if ( dlg.autoSetNormalizationNoneForRealSII ) dlg.autoSetNormalizationNoneForRealSII();
          if ( dlg.updateBlendModeAvailability ) dlg.updateBlendModeAvailability();
          markPreviewSetupChanged();
@@ -7230,7 +7585,14 @@ function autopaletteMain() {
    setupFilteredViewCombo( this.referenceOIII_ViewList, data.referenceOIII, false, true, "<No View Selected>",
       function( view )
       {
+         var oldView = data.referenceOIII;
+         if ( isValidView( view ) && !dlg.validateNarrowbandSourceSelection( data.referenceHA, view, data.referenceSII ) )
+         {
+            dlg.restoreComboSelection( dlg.referenceOIII_ViewList, oldView );
+            return;
+         }
          data.referenceOIII = view;
+         invalidateStarMaskCache();
          if ( dlg.autoSetNormalizationNoneForRealSII ) dlg.autoSetNormalizationNoneForRealSII();
          if ( dlg.updateBlendModeAvailability ) dlg.updateBlendModeAvailability();
          markPreviewSetupChanged();
@@ -7253,7 +7615,14 @@ function autopaletteMain() {
    setupFilteredViewCombo( this.referenceSII_ViewList, data.referenceSII, false, true, "<No View Selected>",
       function( view )
       {
+         var oldView = data.referenceSII;
+         if ( isValidView( view ) && !dlg.validateNarrowbandSourceSelection( data.referenceHA, data.referenceOIII, view ) )
+         {
+            dlg.restoreComboSelection( dlg.referenceSII_ViewList, oldView );
+            return;
+         }
          data.referenceSII = view;
+         invalidateStarMaskCache();
          if ( dlg.autoSetNormalizationNoneForRealSII ) dlg.autoSetNormalizationNoneForRealSII();
          if ( dlg.updateBlendModeAvailability ) dlg.updateBlendModeAvailability();
          markPreviewSetupChanged();
@@ -9176,9 +9545,10 @@ data.selectedPreviewBoosted = false;
    this.maskPreset_Combo.addItem( "Blue Core" );
    this.maskPreset_Combo.addItem( "Warm/Gold" );
    this.maskPreset_Combo.addItem( "Faint Red" );
+   this.maskPreset_Combo.addItem( "External View" );
    this.maskPreset_Combo.currentItem = data.previewMaskPreset || 0;
    this.maskPreset_Combo.enabled = false;
-   this.maskPreset_Combo.toolTip = "<p><b>Preconfigured masks</b></p><p><b>Star Protection</b>: protects stars and halos from Boosted/Advanced changes.</p><p><b>Blue Core</b>: applies Boosted/Advanced changes mainly to OIII/cyan-blue regions.</p><p><b>Warm/Gold</b>: applies Boosted/Advanced changes mainly to warm Ha/SII/gold structures.</p><p><b>Faint Red</b>: applies Boosted/Advanced changes mainly to weaker red Ha/SII regions, avoiding the brightest warm structures.</p></p>";
+   this.maskPreset_Combo.toolTip = "<p><b>Preconfigured masks</b></p><p><b>Star Protection</b>: protects stars and halos from Boosted/Advanced changes.</p><p><b>Blue Core</b>: applies Boosted/Advanced changes mainly to OIII/cyan-blue regions.</p><p><b>Warm/Gold</b>: applies Boosted/Advanced changes mainly to warm Ha/SII/gold structures.</p><p><b>Faint Red</b>: applies Boosted/Advanced changes mainly to weaker red Ha/SII regions, avoiding the brightest warm structures.</p><p><b>External View</b>: uses a user-selected grayscale mask with the same dimensions as the selected source views. White areas receive the Boosted/Advanced effect; black areas remain less affected. Invert Mask is also supported.</p></p>";
    this.maskPreset_Combo.onItemSelected = function()
    {
       if ( !dlg.hasLoadedLargePreviewForControls || !dlg.hasLoadedLargePreviewForControls() )
@@ -9187,6 +9557,8 @@ data.selectedPreviewBoosted = false;
       invalidateStarMaskCache();
       dlg.clearLargePreviewCache();
       dlg.invalidateAdvancedPreviewCache();
+      if ( dlg.refreshMaskControlsState )
+         dlg.refreshMaskControlsState();
       if ( data.previewShowMaskPreview )
          dlg.refreshLargePreviewBoost( true );
       else
@@ -9199,6 +9571,43 @@ data.selectedPreviewBoosted = false;
    this.maskPreset_Sizer.add( this.maskPreset_Combo );
    this.maskPreset_Sizer.addStretch();
 
+
+   this.externalMask_Label = new Label( this );
+   this.externalMask_Label.text = "External mask:";
+   this.externalMask_Label.textAlignment = TextAlign_Right|TextAlign_VertCenter;
+   this.externalMask_Label.minWidth = labelWidth;
+
+   this.externalMask_ViewList = new ComboBox( this );
+   this.externalMask_ViewList.minWidth = 300;
+   this.externalMask_ViewList.enabled = false;
+   this.externalMask_ViewList.toolTip = "<p>Select a grayscale/monochrome mask view with the same dimensions as the selected source views. This imported mask is invalidated automatically whenever the workflow is regenerated.</p>";
+   setupFilteredViewCombo( this.externalMask_ViewList, data.previewExternalMaskView, false, true, "<No View Selected>",
+      function( view )
+      {
+         var oldView = data.previewExternalMaskView;
+         if ( isValidView( view ) && !dlg.validateExternalMaskSelection( view ) )
+         {
+            dlg.restoreComboSelection( dlg.externalMask_ViewList, oldView );
+            return;
+         }
+         data.previewExternalMaskView = view;
+         invalidateStarMaskCache();
+         dlg.clearLargePreviewCache();
+         dlg.invalidateAdvancedPreviewCache();
+         if ( dlg.refreshMaskControlsState )
+            dlg.refreshMaskControlsState();
+         if ( data.previewShowMaskPreview )
+            dlg.refreshLargePreviewBoost( true );
+         else
+            dlg.scheduleRealtimePreviewRefresh();
+      } );
+
+   this.externalMask_Sizer = new HorizontalSizer;
+   this.externalMask_Sizer.spacing = 4;
+   this.externalMask_Sizer.add( this.externalMask_Label );
+   this.externalMask_Sizer.add( this.externalMask_ViewList );
+   this.externalMask_Sizer.addStretch();
+
    this.masks_GroupBox = new Control( this );
    this.masks_GroupBox.backgroundColor = SECTION_BODY_BG;
    this.masks_GroupBox.sizer = new VerticalSizer;
@@ -9207,6 +9616,7 @@ data.selectedPreviewBoosted = false;
       margin = 4;
       spacing = 5;
       add( this.maskPreset_Sizer );
+      add( this.externalMask_Sizer );
       add( this.enableStarProtection_CheckBox );
       add( this.starProtectionAmount_Control );
       addSpacing( 4 );
@@ -9224,6 +9634,9 @@ data.selectedPreviewBoosted = false;
       if ( this.showMaskPreview_CheckBox ) this.showMaskPreview_CheckBox.enabled = maskActive;
       if ( this.invertMask_CheckBox ) this.invertMask_CheckBox.enabled = maskActive;
       if ( this.exportMask_Button ) this.exportMask_Button.enabled = maskActive;
+      var externalMaskControlsEnabled = controlsEnabled && ((data.previewMaskPreset || 0) == 4);
+      if ( this.externalMask_Label ) this.externalMask_Label.enabled = externalMaskControlsEnabled;
+      if ( this.externalMask_ViewList ) this.externalMask_ViewList.enabled = externalMaskControlsEnabled;
    };
 
    this.cosmeticPreset_Label = new Label( this );
